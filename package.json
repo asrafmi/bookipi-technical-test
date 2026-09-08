@@ -21,7 +21,11 @@
     "test:stress": "cd app/backend && npm run test:stress",
     "lint:backend": "cd app/backend && npm run lint",
     "lint:frontend": "cd app/frontend && npm run lint",
-    "lint": "npm run lint:backend && npm run lint:frontend"
+    "lint": "npm run lint:backend && npm run lint:frontend",
+    "docker:up": "docker compose -p bookipi-flash-sale -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml -f app/frontend/build/docker/docker-compose.yml -f app/frontend/build/docker/docker-compose.override.yml up -d",
+    "docker:up:prod": "docker compose -p bookipi-flash-sale -f app/backend/build/docker/docker-compose.yml -f app/frontend/build/docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -p bookipi-flash-sale -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml -f app/frontend/build/docker/docker-compose.yml -f app/frontend/build/docker/docker-compose.override.yml down",
+    "docker:logs": "docker compose -p bookipi-flash-sale -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml -f app/frontend/build/docker/docker-compose.yml -f app/frontend/build/docker/docker-compose.override.yml logs -f"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build:
+      context: ../../
+      dockerfile: build/docker/dockerfile
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    networks:
+      - default
+
+networks:
+  default: {}
