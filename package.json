@@ -1,0 +1,29 @@
+{
+  "name": "bookipi-flash-sale",
+  "version": "1.0.0",
+  "description": "Bookipi take-home: high-throughput flash sale system",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "install:all": "npm install && npm run install:backend && npm run install:frontend",
+    "install:backend": "cd app/backend && npm install",
+    "install:frontend": "cd app/frontend && npm install",
+    "dev:backend": "cd app/backend && npm run dev",
+    "dev:frontend": "cd app/frontend && npm run dev",
+    "dev": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "build:backend": "cd app/backend && npm run build",
+    "build:frontend": "cd app/frontend && npm run build",
+    "build": "npm run build:backend && npm run build:frontend",
+    "test:backend": "cd app/backend && npm test",
+    "test": "npm run test:backend",
+    "test:stress": "cd app/backend && npm run test:stress",
+    "lint:backend": "cd app/backend && npm run lint",
+    "lint:frontend": "cd app/frontend && npm run lint",
+    "lint": "npm run lint:backend && npm run lint:frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
