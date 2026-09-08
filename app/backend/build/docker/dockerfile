@@ -1,0 +1,34 @@
+# Base
+FROM node:22-slim AS base
+
+WORKDIR /app/backend
+
+COPY package*.json ./
+RUN npm install
+
+# Builder
+FROM node:22-slim AS builder
+
+WORKDIR /app/backend
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+RUN npm run build
+
+# Runner
+FROM node:22-slim AS runner
+
+WORKDIR /app/backend
+
+ENV NODE_ENV=production
+
+COPY package*.json ./
+RUN npm install --omit=dev
+
+COPY --from=builder /app/backend/dist ./dist
+
+EXPOSE 3000
+
+ENTRYPOINT ["node", "dist/main.js"]
