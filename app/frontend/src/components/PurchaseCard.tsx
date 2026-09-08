@@ -68,87 +68,95 @@ export function PurchaseCard() {
     !identifierIsValid;
 
   const showValidationFeedback = identifierTouched && !identifierIsValid && !isLocked && !isSubmitting;
+  const showAnyFeedback =
+    showValidationFeedback || (hasSucceeded && successIdentifier) || isAlreadyPurchased || isSoldOut || isEnded || failure;
 
   return (
     <div className="card">
-      <StatusBadge label={badge.label} tone={badge.tone} />
-
-      {isUpcoming && (
-        <CountdownTimer
-          startLabel={`Starts ${new Date(saleStatus.startsAt).toLocaleString("en-US", DATE_FORMAT)}`}
-          targetIso={saleStatus.startsAt}
-        />
-      )}
-
-      <img className="card__image" src={saleStatus.productImage} alt={saleStatus.productName} />
-
-      <div className="card__product">
-        <h3>{saleStatus.productName}</h3>
-        <p>{saleStatus.productDescription}</p>
+      <div className="card__media">
+        <img className="card__image" src={saleStatus.productImage} alt={saleStatus.productName} />
       </div>
 
-      <div className="card__stock">
-        <span>Remaining</span>
-        <span>{stockText}</span>
-      </div>
+      <div className="card__content">
+        <StatusBadge label={badge.label} tone={badge.tone} />
 
-      <div className="card__field">
-        <label htmlFor="identifier">Email or username</label>
-        <input
-          id="identifier"
-          value={identifier}
-          onChange={(e) => setIdentifier(e.target.value)}
-          placeholder="Email or username"
-          disabled={inputDisabled}
-          className={showValidationFeedback ? "input--invalid" : ""}
-        />
-      </div>
-
-      <div className="card__feedback-slot">
-        {showValidationFeedback && (
-          <FeedbackMessage
-            tone="validation"
-            title="Check your entry"
-            body="Enter a valid email address or username to continue."
+        {isUpcoming && (
+          <CountdownTimer
+            startLabel={`Starts ${new Date(saleStatus.startsAt).toLocaleString("en-US", DATE_FORMAT)}`}
+            targetIso={saleStatus.startsAt}
           />
         )}
-        {hasSucceeded && successIdentifier && (
-          <FeedbackMessage tone="success" title="You're in." body={`Confirmed for ${successIdentifier}.`} />
-        )}
-        {isAlreadyPurchased && failure && (
-          <FeedbackMessage tone="neutral" title="You're already in" body={failure.message} />
-        )}
-        {isSoldOut && !failure && (
-          <FeedbackMessage tone="neutral" title="Every unit is claimed" body="Thanks for trying." />
-        )}
-        {isEnded && (
-          <FeedbackMessage tone="neutral" title="This drop has closed" body="Follow for the next release date." />
-        )}
-        {failure && failure.code !== "ALREADY_PURCHASED" && !isSoldOut && !isEnded && (
-          <FeedbackMessage tone="error" title="Something went wrong" body={failure.message} />
-        )}
-      </div>
 
-      <button
-        disabled={buttonDisabled}
-        onClick={submitPurchase}
-        className={`buy-button ${hasSucceeded ? "buy-button--success" : ""}`}
-      >
-        {isSubmitting ? (
-          <span className="dots">
-            <span className="dots__dot" />
-            <span className="dots__dot" />
-            <span className="dots__dot" />
-          </span>
-        ) : (
-          buttonLabel
-        )}
-      </button>
+        <div className="card__product">
+          <h3>{saleStatus.productName}</h3>
+          <p>{saleStatus.productDescription}</p>
+        </div>
 
-      <div className="card__secondary">
-        <a href="#" onClick={(e) => e.preventDefault()}>
-          Already have one? Check your status
-        </a>
+        <div className="card__stock">
+          <span>Remaining</span>
+          <span>{stockText}</span>
+        </div>
+
+        <div className="card__field">
+          <label htmlFor="identifier">Email or username</label>
+          <input
+            id="identifier"
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder="Email or username"
+            disabled={inputDisabled}
+            className={showValidationFeedback ? "input--invalid" : ""}
+          />
+        </div>
+
+        {showAnyFeedback && (
+          <div className="card__feedback-slot">
+            {showValidationFeedback && (
+              <FeedbackMessage
+                tone="validation"
+                title="Check your entry"
+                body="Enter a valid email address or username to continue."
+              />
+            )}
+            {hasSucceeded && successIdentifier && (
+              <FeedbackMessage tone="success" title="You're in." body={`Confirmed for ${successIdentifier}.`} />
+            )}
+            {isAlreadyPurchased && failure && (
+              <FeedbackMessage tone="neutral" title="You're already in" body={failure.message} />
+            )}
+            {isSoldOut && !failure && (
+              <FeedbackMessage tone="neutral" title="Every unit is claimed" body="Thanks for trying." />
+            )}
+            {isEnded && (
+              <FeedbackMessage tone="neutral" title="This drop has closed" body="Follow for the next release date." />
+            )}
+            {failure && failure.code !== "ALREADY_PURCHASED" && !isSoldOut && !isEnded && (
+              <FeedbackMessage tone="error" title="Something went wrong" body={failure.message} />
+            )}
+          </div>
+        )}
+
+        <button
+          disabled={buttonDisabled}
+          onClick={submitPurchase}
+          className={`buy-button ${hasSucceeded ? "buy-button--success" : ""}`}
+        >
+          {isSubmitting ? (
+            <span className="dots">
+              <span className="dots__dot" />
+              <span className="dots__dot" />
+              <span className="dots__dot" />
+            </span>
+          ) : (
+            buttonLabel
+          )}
+        </button>
+
+        <div className="card__secondary">
+          <a href="#" onClick={(e) => e.preventDefault()}>
+            Already have one? Check your status
+          </a>
+        </div>
       </div>
     </div>
   );
