@@ -3,7 +3,7 @@ services:
     build:
       context: ../../../..
       dockerfile: app/frontend/build/docker/dockerfile
-      target: production
+      target: runner
     image: bookipi-flash-sale-frontend:latest
     container_name: bookipi-flash-sale-frontend
     ports:
