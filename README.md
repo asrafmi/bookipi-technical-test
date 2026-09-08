@@ -13,7 +13,10 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 - Done — Backend: boilerplate set up (NestJS + Fastify, config loading, Swagger docs) with
   one dummy endpoint (`GET /v1/flash-sale/status`, hardcoded response). See
   [app/backend/README.md](app/backend/README.md).
-- Pending — Backend: purchase logic, the other two endpoints, persistence, and the frontend
+- Done — Backend: persistence layer wired (Drizzle + Postgres, `purchases` table migrated,
+  `PurchaseRepository` implemented; Redis provisioned via docker-compose, not yet used
+  in code). Not yet called by any endpoint.
+- Pending — Backend: the atomic purchase decision, the other two endpoints, and the frontend
   actually talking to it.
 - Pending — Stress tests, unit/integration tests: waiting on the real backend logic.
 
@@ -22,6 +25,8 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 ```bash
 npm run install:all   # installs root, backend, and frontend deps
 cp app/backend/.env.example app/backend/.env
+docker compose -f app/backend/build/docker/docker-compose.yml up -d db redis
+npm --prefix app/backend run db:migrate
 npm run dev            # runs backend + frontend concurrently
 ```
 
@@ -215,6 +220,18 @@ a retry gets back `ALREADY_PURCHASED` referencing the same purchase.
 Why: a double click is normal behavior in a flash sale, not an error condition.
 Responding to a retry with failure just encourages the user to retry again, adding
 load exactly when the system is under the most pressure.
+
+**Decision 3.5: `PurchaseRepository` wraps a Drizzle client, it doesn't extend one.**
+
+Chosen: a plain `@Injectable()` class holding an injected Drizzle client instance,
+exposing `findByIdentifier`, `count`, and `insertIfNotExists` — the last one using
+`.onConflictDoNothing()` against the `UNIQUE(sale_id, identifier)` index and treating
+an empty result as "already purchased" rather than throwing.
+
+Why: Drizzle has no ORM-style base `Repository` class to extend, unlike TypeORM.
+Rather than build one, the repository stays a thin wrapper — consistent with the
+project's general bias toward fewer abstractions than a typical company style guide
+would default to.
 
 **Decision 5: what's deliberately not built.**
 

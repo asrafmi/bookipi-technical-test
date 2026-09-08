@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: ../../
+      dockerfile: build/docker/dockerfile
+      target: base
+    working_dir: /app/backend
+    environment:
+      - NODE_ENV=development
+    env_file:
+      - ../../.env
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - ../../:/app/backend
+      - /app/backend/node_modules
+    command: sh -c "npm run dev"
