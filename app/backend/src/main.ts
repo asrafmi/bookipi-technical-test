@@ -1,0 +1,30 @@
+import "reflect-metadata";
+import { NestFactory } from "@nestjs/core";
+import { FastifyAdapter, NestFastifyApplication } from "@nestjs/platform-fastify";
+import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
+import { AppModule } from "./app.module";
+import ConfigService from "./config/config.service";
+
+async function bootstrap() {
+  const app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter());
+
+  const swaggerConfig = new DocumentBuilder()
+    .setTitle("Flash Sale API")
+    .setDescription("High-throughput flash sale system")
+    .setVersion("1.0")
+    .build();
+  const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
+  SwaggerModule.setup("docs", app, swaggerDocument);
+
+  const configService = app.get(ConfigService);
+  const { port } = configService.app();
+  await app.listen(port, "0.0.0.0", (err, address) => {
+    if (err) {
+      console.error(err);
+      process.exit(1);
+    }
+    console.log(`Server listening at ${address}`);
+  });
+}
+
+bootstrap();
