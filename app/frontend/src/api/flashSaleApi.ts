@@ -1,4 +1,5 @@
 import type { PurchaseResult, SaleStatus, UserStatus } from "../types/flashSale";
+import { SaleWindowStatus } from "../types/flashSale";
 
 const PRODUCT_NAME = "Lionel Messi Argentina 2026 Special Edition Black and Gold Premium Soccer Jersey Shirt";
 const PRODUCT_DESCRIPTION = "Limited commemorative run. Never restocked.";
@@ -18,11 +19,11 @@ function delay<T>(value: T, ms = NETWORK_DELAY_MS): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
 }
 
-function getWindowStatus(): "upcoming" | "active" | "ended" {
+function getWindowStatus(): SaleWindowStatus {
   const now = Date.now();
-  if (now < new Date(SALE_STARTS_AT).getTime()) return "upcoming";
-  if (now > new Date(SALE_ENDS_AT).getTime()) return "ended";
-  return "active";
+  if (now < new Date(SALE_STARTS_AT).getTime()) return SaleWindowStatus.UPCOMING;
+  if (now > new Date(SALE_ENDS_AT).getTime()) return SaleWindowStatus.ENDED;
+  return SaleWindowStatus.ACTIVE;
 }
 
 export async function fetchSaleStatus(): Promise<SaleStatus> {
@@ -41,10 +42,10 @@ export async function fetchSaleStatus(): Promise<SaleStatus> {
 export async function attemptPurchase(identifier: string): Promise<PurchaseResult> {
   const windowStatus = getWindowStatus();
 
-  if (windowStatus === "upcoming") {
+  if (windowStatus === SaleWindowStatus.UPCOMING) {
     return delay({ ok: false, code: "SALE_NOT_STARTED", message: "The sale hasn't opened yet." });
   }
-  if (windowStatus === "ended") {
+  if (windowStatus === SaleWindowStatus.ENDED) {
     return delay({ ok: false, code: "SALE_ENDED", message: "This drop has closed." });
   }
   if (purchasedIdentifiers.has(identifier)) {

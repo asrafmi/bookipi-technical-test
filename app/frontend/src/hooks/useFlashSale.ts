@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { attemptPurchase, fetchSaleStatus } from "../api/flashSaleApi";
-import type { PurchaseFailure, SaleStatus } from "../types/flashSale";
-
-export type SubmitState = "idle" | "submitting" | "success" | "failure";
+import { SubmitState, type PurchaseFailure, type SaleStatus } from "../types/flashSale";
 
 interface FlashSaleState {
   saleStatus: SaleStatus | null;
@@ -22,7 +20,7 @@ export function useFlashSale() {
   const [state, setState] = useState<FlashSaleState>({
     saleStatus: null,
     identifier: "",
-    submitState: "idle",
+    submitState: SubmitState.IDLE,
     failure: null,
     successIdentifier: null,
   });
@@ -43,7 +41,7 @@ export function useFlashSale() {
   }, []);
 
   const submitPurchase = useCallback(async () => {
-    setState((prev) => ({ ...prev, submitState: "submitting", failure: null }));
+    setState((prev) => ({ ...prev, submitState: SubmitState.SUBMITTING, failure: null }));
 
     const trimmed = state.identifier.trim();
     const result = await attemptPurchase(trimmed);
@@ -51,14 +49,14 @@ export function useFlashSale() {
     if (result.ok) {
       setState((prev) => ({
         ...prev,
-        submitState: "success",
+        submitState: SubmitState.SUCCESS,
         successIdentifier: result.identifier,
         saleStatus: prev.saleStatus
           ? { ...prev.saleStatus, stockRemaining: Math.max(0, prev.saleStatus.stockRemaining - 1) }
           : prev.saleStatus,
       }));
     } else {
-      setState((prev) => ({ ...prev, submitState: "failure", failure: result }));
+      setState((prev) => ({ ...prev, submitState: SubmitState.FAILURE, failure: result }));
     }
   }, [state.identifier]);
 
