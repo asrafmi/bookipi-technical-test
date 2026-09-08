@@ -1,3 +1,5 @@
+name: bookipi-flash-sale-frontend
+
 services:
   frontend:
     build:

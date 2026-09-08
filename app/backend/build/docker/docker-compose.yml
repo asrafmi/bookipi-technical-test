@@ -1,3 +1,5 @@
+name: bookipi-flash-sale-backend
+
 services:
   backend:
     build:
