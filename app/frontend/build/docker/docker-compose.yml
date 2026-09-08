@@ -1,12 +1,14 @@
 services:
   frontend:
     build:
-      context: ../../
-      dockerfile: build/docker/dockerfile
+      context: ../../../..
+      dockerfile: app/frontend/build/docker/dockerfile
+      target: dev
+    image: bookipi-flash-sale-frontend:dev
+    container_name: bookipi-flash-sale-frontend-dev
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
-    networks:
-      - default
-
-networks:
-  default: {}
+      - "${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ../..:/app
+      - /app/node_modules
+    restart: unless-stopped

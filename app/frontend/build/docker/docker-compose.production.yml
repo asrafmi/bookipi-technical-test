@@ -1,0 +1,11 @@
+services:
+  frontend:
+    build:
+      context: ../../../..
+      dockerfile: app/frontend/build/docker/dockerfile
+      target: production
+    image: bookipi-flash-sale-frontend:latest
+    container_name: bookipi-flash-sale-frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    restart: unless-stopped
