@@ -1,5 +1,5 @@
 import { ApiProperty } from "@nestjs/swagger";
-import { SaleWindowStatus } from "../../../types/sale-status";
+import { SaleWindowStatus } from "src/flash-sale/types/sale-status";
 
 export class GetSaleStatusResponse {
   @ApiProperty({ enum: Object.values(SaleWindowStatus) })

@@ -1,6 +1,6 @@
 import { Injectable, InternalServerErrorException, NotFoundException } from "@nestjs/common";
-import { SaleWindowStatus } from "../../types/sale-status";
-import { PurchaseResult, SaleStatus } from "./flash-sale.interface";
+import { SaleWindowStatus } from "src/flash-sale/types/sale-status";
+import { PurchaseResult, SaleStatus } from "src/flash-sale/domain/flash-sale/flash-sale.interface";
 import { SaleRepository } from "src/flash-sale/infrastructure/repository/sale/sale.repository";
 import { PurchaseRepository } from "src/flash-sale/infrastructure/repository/purchase/purchase.repository";
 import { PurchaseGateway } from "src/flash-sale/infrastructure/redis/purchase-gateway";

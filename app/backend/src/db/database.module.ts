@@ -1,7 +1,7 @@
 import { Global, Module } from "@nestjs/common";
-import ConfigModule from "../config/config.module";
-import ConfigService from "../config/config.service";
-import { createDrizzleClient, DrizzleClient } from "./client";
+import ConfigModule from "src/config/config.module";
+import ConfigService from "src/config/config.service";
+import { createDrizzleClient, DrizzleClient } from "src/db/client";
 
 export const DRIZZLE_CLIENT = "DRIZZLE_CLIENT";
 

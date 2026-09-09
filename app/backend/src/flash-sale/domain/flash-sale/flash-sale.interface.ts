@@ -1,4 +1,4 @@
-import { SaleWindowStatus } from "../../types/sale-status";
+import { SaleWindowStatus } from "src/flash-sale/types/sale-status";
 import { PurchaseErrorCode } from "src/flash-sale/types/purchase";
 
 export interface SaleStatus {

@@ -1,7 +1,7 @@
 import { Controller, Get, Param } from "@nestjs/common";
 import { ApiOperation, ApiOkResponse } from "@nestjs/swagger";
-import { FlashSaleService } from "../../../domain/flash-sale/flash-sale.service";
-import { GetSaleStatusResponse } from "../response/get-sale-status.response";
+import { FlashSaleService } from "src/flash-sale/domain/flash-sale/flash-sale.service";
+import { GetSaleStatusResponse } from "src/flash-sale/application/rest/response/get-sale-status.response";
 
 @Controller()
 export class FlashSaleController {

@@ -1,5 +1,5 @@
 import { pgTable, timestamp, uniqueIndex, uuid, varchar } from "drizzle-orm/pg-core";
-import { sales } from "../sale/sale.entity";
+import { sales } from "src/flash-sale/infrastructure/repository/sale/sale.entity";
 
 export const purchases = pgTable(
   "purchases",

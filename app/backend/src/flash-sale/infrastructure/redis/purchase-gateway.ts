@@ -45,7 +45,7 @@ export class PurchaseGateway implements OnModuleInit {
       endsAt.getTime()
     );
 
-    if (outcome === "OKE") return { accepted: true };
+    if (outcome === "OK") return { accepted: true };
     return { accepted: false, code: PurchaseErrorCode[outcome as keyof typeof PurchaseErrorCode] };
   }
 

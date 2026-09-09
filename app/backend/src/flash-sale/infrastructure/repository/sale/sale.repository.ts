@@ -2,7 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { eq } from "drizzle-orm/sql/expressions/conditions";
 import { DrizzleClient } from "src/db/client";
 import { DRIZZLE_CLIENT } from "src/db/database.module";
-import { sales } from "./sale.entity";
+import { sales } from "src/flash-sale/infrastructure/repository/sale/sale.entity";
 
 @Injectable()
 export class SaleRepository {
