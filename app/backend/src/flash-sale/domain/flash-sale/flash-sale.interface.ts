@@ -1,4 +1,5 @@
 import { SaleWindowStatus } from "../../types/sale-status";
+import { PurchaseErrorCode } from "src/flash-sale/types/purchase";
 
 export interface SaleStatus {
   status: SaleWindowStatus;
@@ -9,3 +10,7 @@ export interface SaleStatus {
   stockRemaining: number;
   totalStock: number;
 }
+
+export type PurchaseResult =
+  | { ok: true; identifier: string; purchasedAt: string }
+  | { ok: false; code: PurchaseErrorCode; message: string };

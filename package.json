@@ -36,8 +36,10 @@
     "docker:down:prod": "npm run docker:down:backend:prod && npm run docker:down:frontend:prod",
     "docker:logs:backend": "docker compose -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml logs -f",
     "docker:logs:frontend": "docker compose -f app/frontend/build/docker/docker-compose.yml logs -f",
+    "docker:logs": "npm run docker:logs:backend && npm run docker:logs:frontend",
     "docker:logs:backend:prod": "docker compose -f app/backend/build/docker/docker-compose.production.yml logs -f",
-    "docker:logs:frontend:prod": "docker compose -f app/frontend/build/docker/docker-compose.production.yml logs -f"
+    "docker:logs:frontend:prod": "docker compose -f app/frontend/build/docker/docker-compose.production.yml logs -f",
+    "docker:logs:prod": "npm run docker:logs:backend:prod && npm run docker:logs:frontend:prod"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

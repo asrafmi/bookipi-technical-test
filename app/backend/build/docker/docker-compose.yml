@@ -12,6 +12,7 @@ services:
       # Postgres and Redis are reachable by service name, not localhost
       - DB_HOST=db
       - REDIS_HOST=redis
+      - REDIS_PORT=6379
     ports:
       - "${PORT:-3000}:3000"
     depends_on:
@@ -55,6 +56,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: always
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@local.dev}
+      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-admin}
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - ./volumes/pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - default
 
 networks:
   default: {}
