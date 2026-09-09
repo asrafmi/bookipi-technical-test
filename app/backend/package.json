@@ -6,7 +6,8 @@
     "build": "nest build && tsc-alias",
     "dev": "nest start --watch",
     "start": "node dist/main.js",
-    "test": "jest --passWithNoTests",
+    "test": "jest --passWithNoTests --testPathIgnorePatterns=integration.test.ts",
+    "test:integration": "jest --passWithNoTests --testRegex=integration.test.ts$ --runInBand",
     "lint": "eslint \"src/**/*.ts\"",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
@@ -37,12 +38,14 @@
     "@nestjs/testing": "^10.4.15",
     "@types/jest": "^29.5.14",
     "@types/node": "^22.10.2",
+    "@types/supertest": "^7.2.1",
     "@typescript-eslint/eslint-plugin": "^8.18.1",
     "@typescript-eslint/parser": "^8.18.1",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
     "eslint": "^8.57.1",
     "jest": "^29.7.0",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
     "tsc-alias": "^1.9.4",
@@ -62,6 +65,7 @@
     ],
     "moduleNameMapper": {
       "^src/(.*)$": "<rootDir>/$1"
-    }
+    },
+    "testTimeout": 15000
   }
 }

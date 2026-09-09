@@ -1,8 +1,8 @@
-import { drizzle, PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
 
-export type DrizzleClient = PostgresJsDatabase<typeof schema>;
+export type DrizzleClient = ReturnType<typeof drizzle<typeof schema>>;
 
 export function createDrizzleClient(config: {
   host: string;

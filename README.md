@@ -20,10 +20,14 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   table, seeded by migration with a fixed id (`default`) rather than env vars — see
   Decision 6 below.
 - Done — Backend: unit tests for the sale window logic (`flash-sale.test.ts`).
+- Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
+  a real running Nest app over HTTP, against real Postgres and real Redis — every error
+  taxonomy code, the oversell invariant, and the duplicate-user invariant. See Testing
+  below.
 - Pending — Frontend wired to the real backend (still talks to its in-memory mock).
-- Pending — Integration tests against a running server + real Redis/Postgres, and the
-  stress tests (oversell, duplicate-user, boundary). Manual `curl` verification has been
-  done for every endpoint and error code; automated coverage is the next step.
+- Pending — Stress tests at higher concurrency (oversell/duplicate-user proven at small
+  N via integration tests; a dedicated k6/autocannon run at realistic N is still needed
+  for the results table).
 
 ## Quick start
 
@@ -367,23 +371,51 @@ versus manual so far.
 
 - **Unit (automated):** `flash-sale.test.ts` covers the sale window boundary logic
   (`resolveWindowStatus`) — before `startsAt`, exactly at `startsAt`, exactly at
-  `endsAt`, and just after `endsAt`. Run with `npm run test:backend` (or
-  `npm --prefix app/backend run test`).
-- **Endpoint behavior (manual so far):** every endpoint and every error/status code
-  combination in the API reference table above has been exercised via `curl` against
-  the real running server, real Redis, and real Postgres — including forcing
-  `SALE_NOT_STARTED`, `SALE_ENDED`, `ALREADY_PURCHASED`, and `NOT_PURCHASED` by
-  adjusting the seeded sale's window, and confirming the idempotency guarantee
-  (Decision 4): a second purchase call for the same identifier returns
-  `ALREADY_PURCHASED`, not a duplicate success or a generic error.
-- **Integration (automated) — pending:** the manual verification above needs to become
-  a real test suite that hits the running server over HTTP against real Redis/Postgres
-  (mocking Redis here would defeat the point of testing the concurrency mechanism).
-- **Stress tests — pending:** the oversell test (stock `S`, `N ≫ S` concurrent
-  requests from distinct users, assert exactly `S` succeeded and stock never goes
-  negative), the duplicate-user test (one user, many concurrent requests, exactly one
-  success), and boundary tests, run repeatedly since race conditions are probabilistic.
+  `endsAt`, and just after `endsAt`. No infrastructure needed. Run with
+  `npm run test:backend` (or `npm --prefix app/backend run test`).
+- **Integration (automated):** `flash-sale.integration.test.ts` boots the real Nest
+  application (Fastify adapter, same `ValidationPipe` as `main.ts`) and drives it over
+  HTTP with `supertest`, against the real Postgres and Redis started by
+  `docker compose` — deliberately not mocked, since mocking Redis here would defeat
+  the point of testing the atomic decision (section 4.3 of the working notes). Each
+  test seeds its own `sales` row with a window relative to `Date.now()` (not the fixed
+  seeded `default` row, which goes stale) and cleans up its own `purchases` rows plus
+  the sale's Redis keys afterwards, so tests don't interfere with each other or with a
+  manually-running dev server. Covers:
+  - Every status/error code in the taxonomy table: `SALE_NOT_STARTED` (403),
+    `SALE_ENDED` (410), `ALREADY_PURCHASED` (409), `SOLD_OUT` (409), `NOT_PURCHASED`
+    (200), and a successful purchase (200), each asserted against both the HTTP
+    response and the underlying Postgres/Redis state.
+  - **Idempotency** (Decision 4): the same identifier purchasing twice sequentially
+    returns `ALREADY_PURCHASED` on the second call, with exactly one row in `purchases`.
+  - **Oversell invariant:** stock `S = 5`, `30` concurrent requests from distinct
+    identifiers — asserts exactly `5` accepted, `25` `SOLD_OUT`, the Redis stock key at
+    exactly `0`, and exactly `5` rows in `purchases`.
+  - **Duplicate-user invariant:** one identifier firing `10` concurrent requests —
+    asserts exactly `1` accepted, `9` `ALREADY_PURCHASED`, and exactly `1` row in
+    `purchases`.
+  - Malformed request body (`class-validator` DTO rejection) returns 400.
+
+  Run with `npm run test:integration` (or `npm --prefix app/backend run
+  test:integration`) — **requires `docker compose ... up -d db redis` running first**
+  and the `.env` from Quick start. Kept as a separate Jest run
+  (`testPathIgnorePatterns` / a dedicated `testRegex`) from the unit suite so
+  `npm test` stays fast and infra-free; this suite is the one that needs the stack up.
+- **Endpoint behavior (manual, superseded by the above):** every endpoint/code
+  combination was originally verified by hand via `curl` before the integration suite
+  existed. Left as a historical note — the integration tests are now the source of
+  truth for this.
+- **Stress tests — pending:** the oversell and duplicate-user invariants above are
+  proven at small `N` (`30` and `10` respectively) as part of the integration suite;
+  what's still pending is a dedicated high-`N` run (k6/autocannon) for the throughput
+  numbers in the Stress test results section below, run repeatedly since race
+  conditions are probabilistic even though the atomicity mechanism itself is already
+  covered.
 - Frontend: no test runner installed yet, and not yet wired to the real backend.
+- **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
+  pull request — backend typecheck, backend unit tests, backend integration tests
+  (with real `postgres:16-alpine` and `redis:7-alpine` service containers, migrated
+  before the suite runs), and frontend lint + build, as four independent jobs.
 
 ## Stress test results
 
@@ -398,6 +430,10 @@ at least ten times, not once.
 
 ## Known limitations
 
+- **The backend has no ESLint config yet** (`app/backend`'s `npm run lint` script
+  exists but there's no `.eslintrc`) — CI's backend job runs `tsc --noEmit` instead,
+  which catches type errors but not style/lint issues. The frontend's `oxlint` is
+  configured and does run in CI.
 - **The frontend is not wired to the real backend yet** — it's still fully built
   against its own in-memory mock (`app/frontend/src/api/flashSaleApi.ts`).
 - **The Redis decrement and the Postgres insert are not atomic with each other.**
@@ -409,12 +445,11 @@ at least ten times, not once.
   confirm/rollback state machine — complexity that isn't justified at this scale.
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
-- **Automated integration and stress tests don't exist yet** — only the sale-window
-  unit test is automated. Every endpoint has been verified manually against the real
-  stack, but "verified manually once" is exactly the trap section 4.1 of the working
-  notes warns about — a single passing run proves little for a concurrency-critical
-  path. Writing the automated oversell/duplicate-user/boundary tests is the next
-  priority, not an afterthought.
+- **High-`N` stress tests don't exist yet.** The oversell and duplicate-user
+  invariants are covered by the automated integration suite at small `N` (`30` and
+  `10`), which is enough to prove the atomicity mechanism itself is correct, but not
+  enough to produce a throughput number. A k6/autocannon run at realistic concurrency
+  is still needed for the Stress test results section.
 - **Path aliasing (`src/...` absolute imports) needed extra wiring beyond `tsconfig.json`
   alone.** TypeScript's `paths` only affects compile-time resolution, not runtime — so
   `ts-jest` needed a matching `moduleNameMapper`, and `nest build`'s output needed

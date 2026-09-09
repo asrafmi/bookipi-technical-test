@@ -18,6 +18,7 @@
     "build": "npm run build:backend && npm run build:frontend",
     "test:backend": "cd app/backend && npm test",
     "test": "npm run test:backend",
+    "test:integration": "cd app/backend && npm run test:integration",
     "test:stress": "cd app/backend && npm run test:stress",
     "lint:backend": "cd app/backend && npm run lint",
     "lint:frontend": "cd app/frontend && npm run lint",
