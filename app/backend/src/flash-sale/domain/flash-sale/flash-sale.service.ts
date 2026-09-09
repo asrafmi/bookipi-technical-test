@@ -13,6 +13,7 @@ const ERROR_MESSAGES: Record<PurchaseErrorCode, string> = {
   [PurchaseErrorCode.ALREADY_PURCHASED]: "You have already purchased this item.",
   [PurchaseErrorCode.SOLD_OUT]: "This item is sold out.",
   [PurchaseErrorCode.TEMPORARY_FAILURE]: "Something went wrong. Please try again.",
+  [PurchaseErrorCode.NOT_PURCHASED]: "This user has not purchased an item in this sale.",
 };
 
 @Injectable()
@@ -62,6 +63,10 @@ export class FlashSaleService {
     if (errSale) throw new InternalServerErrorException("Failed to fetch sale status");
     if (!sale) throw new NotFoundException("Sale not found");
 
+    const [errCount, purchasedCount] = await awaitToError(this.purchaseRepository.count(saleId));
+    if (errCount) throw new InternalServerErrorException("Failed to fetch purchase count");
+    await this.purchaseGateway.bootstrap(saleId, sale.totalStock, purchasedCount);
+
     const now = new Date();
     const gatewayResult = await this.purchaseGateway.attemptPurchase(saleId, identifier, now, sale.startsAt, sale.endsAt);
     if (!gatewayResult.accepted) return this.failure(gatewayResult.code);
@@ -74,9 +79,16 @@ export class FlashSaleService {
       await this.purchaseGateway.compensate(saleId, identifier);
       return this.failure(PurchaseErrorCode.TEMPORARY_FAILURE);
     }
-    if (!purchase) {
-      return this.failure(PurchaseErrorCode.ALREADY_PURCHASED);
-    }
+    if (!purchase) return this.failure(PurchaseErrorCode.ALREADY_PURCHASED);
+
+    return { accepted: true, identifier: purchase.identifier, purchasedAt: purchase.createdAt.toISOString() };
+  }
+
+  async checkPurchaseStatus(saleId: string, identifier: string): Promise<PurchaseResult> {
+    const [errPurchase, purchase] = await awaitToError(this.purchaseRepository.findByIdentifier(saleId, identifier));
+    if (errPurchase) throw new InternalServerErrorException("Failed to fetch purchase status");
+    if (!purchase) return this.failure(PurchaseErrorCode.NOT_PURCHASED);
+
     return { accepted: true, identifier: purchase.identifier, purchasedAt: purchase.createdAt.toISOString() };
   }
 }
