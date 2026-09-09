@@ -12,5 +12,5 @@ export interface SaleStatus {
 }
 
 export type PurchaseResult =
-  | { ok: true; identifier: string; purchasedAt: string }
-  | { ok: false; code: PurchaseErrorCode; message: string };
+  | { accepted: true; identifier: string; purchasedAt: string }
+  | { accepted: false; code: PurchaseErrorCode; message: string };
