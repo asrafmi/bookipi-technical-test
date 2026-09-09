@@ -25,12 +25,19 @@
     "docker:up:backend": "docker compose -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml up -d",
     "docker:up:frontend": "docker compose -f app/frontend/build/docker/docker-compose.yml up -d",
     "docker:up": "npm run docker:up:backend && npm run docker:up:frontend",
-    "docker:up:prod": "docker compose -f app/backend/build/docker/docker-compose.yml up -d && docker compose -f app/frontend/build/docker/docker-compose.production.yml up -d",
+    "docker:up:backend:prod": "docker compose -f app/backend/build/docker/docker-compose.production.yml up -d",
+    "docker:up:frontend:prod": "docker compose -f app/frontend/build/docker/docker-compose.production.yml up -d",
+    "docker:up:prod": "npm run docker:up:backend:prod && npm run docker:up:frontend:prod",
     "docker:down:backend": "docker compose -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml down",
     "docker:down:frontend": "docker compose -f app/frontend/build/docker/docker-compose.yml down",
     "docker:down": "npm run docker:down:backend && npm run docker:down:frontend",
+    "docker:down:backend:prod": "docker compose -f app/backend/build/docker/docker-compose.production.yml down",
+    "docker:down:frontend:prod": "docker compose -f app/frontend/build/docker/docker-compose.production.yml down",
+    "docker:down:prod": "npm run docker:down:backend:prod && npm run docker:down:frontend:prod",
     "docker:logs:backend": "docker compose -f app/backend/build/docker/docker-compose.yml -f app/backend/build/docker/docker-compose.override.yml logs -f",
-    "docker:logs:frontend": "docker compose -f app/frontend/build/docker/docker-compose.yml logs -f"
+    "docker:logs:frontend": "docker compose -f app/frontend/build/docker/docker-compose.yml logs -f",
+    "docker:logs:backend:prod": "docker compose -f app/backend/build/docker/docker-compose.production.yml logs -f",
+    "docker:logs:frontend:prod": "docker compose -f app/frontend/build/docker/docker-compose.production.yml logs -f"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
