@@ -1,8 +1,8 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { and, eq } from "drizzle-orm";
-import awaitToError from "../../../../common/error/await-to-error";
-import { DRIZZLE_CLIENT } from "../../../../db/database.module";
-import { DrizzleClient } from "../../../../db/client";
+import awaitToError from "src/common/error/await-to-error";
+import { DRIZZLE_CLIENT } from "src/db/database.module";
+import { DrizzleClient } from "src/db/client";
 import { NewPurchaseRow, purchases } from "./purchase.entity";
 
 @Injectable()

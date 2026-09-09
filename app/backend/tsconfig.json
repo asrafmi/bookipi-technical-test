@@ -13,7 +13,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": "./"
+    "baseUrl": "./",
+    "types": ["node", "jest"],
+    "paths": {
+      "src/*": ["src/*"]
+    }
   },
   "include": ["src/**/*.ts"]
 }
