@@ -1,4 +1,4 @@
-import { Global, Module } from "@nestjs/common";
+import { Global, Inject, Module, OnModuleDestroy } from "@nestjs/common";
 import ConfigModule from "src/config/config.module";
 import ConfigService from "src/config/config.service";
 import { createDrizzleClient, DrizzleClient } from "src/db/client";
@@ -17,4 +17,10 @@ export const DRIZZLE_CLIENT = "DRIZZLE_CLIENT";
   ],
   exports: [DRIZZLE_CLIENT],
 })
-export class DatabaseModule {}
+export class DatabaseModule implements OnModuleDestroy {
+  constructor(@Inject(DRIZZLE_CLIENT) private readonly db: DrizzleClient) {}
+
+  async onModuleDestroy() {
+    await this.db.$client.end();
+  }
+}
