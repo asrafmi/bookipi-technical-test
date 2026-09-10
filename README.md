@@ -31,9 +31,10 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   substituted into `env-config.js` by the container's entrypoint at startup) so the
   same built image can point at different backend URLs without a rebuild — see
   Known limitations for the one file that doesn't use this path yet.
-- Pending — Stress tests at higher concurrency (oversell/duplicate-user proven at small
-  N via integration tests; a dedicated k6/autocannon run at realistic N is still needed
-  for the results table).
+- Done — Stress tests at high concurrency (`npm run test:stress` in `app/backend`):
+  10 iterations of stock=50/1000-concurrent-user oversell, one duplicate-user run,
+  and one boundary run, all against the real running server. See Stress test results
+  below.
 
 ## Quick start
 
@@ -424,12 +425,30 @@ versus manual so far.
   combination was originally verified by hand via `curl` before the integration suite
   existed. Left as a historical note — the integration tests are now the source of
   truth for this.
-- **Stress tests — pending:** the oversell and duplicate-user invariants above are
-  proven at small `N` (`30` and `10` respectively) as part of the integration suite;
-  what's still pending is a dedicated high-`N` run (k6/autocannon) for the throughput
-  numbers in the Stress test results section below, run repeatedly since race
-  conditions are probabilistic even though the atomicity mechanism itself is already
-  covered.
+- **Stress (automated, own script):** `app/backend/src/flash-sale/stress-test/run.ts`,
+  run with `npm run test:stress` (or `npm --prefix app/backend run test:stress`).
+  Deliberately not k6/autocannon — those tools measure throughput, not correctness, and
+  section 4.1 of the working notes is explicit that a stress test must assert
+  invariants, not just report requests/sec. This script does both: it drives the real
+  running server over plain HTTP (same `POST .../purchase` route the frontend calls —
+  never a reimplementation of the Lua/Postgres decision), then asserts against the real
+  Postgres and Redis state afterward, same as the integration suite but at much higher
+  `N` and repeated automatically:
+  - **Oversell invariant**, repeated 10x with a fresh sale row per iteration (config
+    via env, defaults `STRESS_TEST_STOCK=20`, `STRESS_TEST_CONCURRENCY=500`,
+    `STRESS_TEST_ITERATIONS=10`): stock `S`, `N ≫ S` concurrent distinct identifiers,
+    asserts exactly `S` accepted, `N-S` `SOLD_OUT`, Redis stock key exactly `0`, and
+    exactly `S` rows in `purchases` — every iteration, not just the first.
+  - **Duplicate-user invariant** (`STRESS_TEST_DUPLICATE_CONCURRENCY`, default `50`):
+    one identifier firing `N` concurrent requests, asserts exactly `1` accepted and
+    `N-1` `ALREADY_PURCHASED`.
+  - **Boundary invariant:** one request against a sale whose window hasn't opened yet
+    (`SALE_NOT_STARTED`/403) and one against a sale whose window already closed
+    (`SALE_ENDED`/410).
+  - Requires the stack up the same way `test:integration` does — `docker compose ...
+    up -d db redis`, migrations applied, and the API server itself running
+    (`npm run dev` or `npm start`) since this hits it over real HTTP rather than an
+    in-process Nest test module.
 - Frontend: no test runner installed yet.
 - **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
   pull request — backend typecheck, backend unit tests, backend integration tests
@@ -447,14 +466,123 @@ versus manual so far.
 
 ## Stress test results
 
-Not yet run. What to expect once they are, and why: the atomic decision (Decision 1)
-means the oversell test's invariant — exactly `S` successes out of `N ≫ S` concurrent
+**How to run:** `npm --prefix app/backend run test:stress`, against a running stack
+(`docker compose ... up -d db redis`, migrations applied, backend running on
+`localhost:3000`). See Testing above for what the script does and its env-var knobs.
+
+**Expected outcome, stated before running it:** the atomic decision (Decision 1) means
+the oversell test's invariant — exactly `S` successes out of `N ≫ S` concurrent
 requests, remaining stock exactly `0`, never negative — should hold regardless of `N`,
 because Redis serializes the Lua script execution; the expected bottleneck under load
 is Redis single-threaded throughput on that one key, not a race condition slipping
-through. If a run ever shows more than `S` successes, that's evidence the atomicity
-assumption is broken, not evidence of "bad luck" — which is why the plan is to run it
-at least ten times, not once.
+through. If a run ever showed more than `S` successes, that would be evidence the
+atomicity assumption is broken, not "bad luck" — which is why it's run repeatedly
+rather than once.
+
+**Hardware:** Apple M5, 10 cores, 16 GB RAM, macOS 26.6.2. Postgres 16 and Redis 7 in
+Docker (`docker compose`), backend running natively via `npm run dev` (Nest/Fastify),
+all on the same machine — so these numbers include Docker's loopback networking
+overhead and are a lower bound on what dedicated hardware would show, not an upper
+one.
+
+**Oversell test** — stock `S = 50`, `N = 1,000` concurrent distinct identifiers per
+iteration, 10 iterations, each against a freshly seeded sale row:
+
+| Iter | Accepted | Sold out | Redis stock | DB rows | Duration (ms) | Result |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 950 | 0 | 50 | 366 | PASS |
+| 2 | 50 | 950 | 0 | 50 | 261 | PASS |
+| 3 | 50 | 950 | 0 | 50 | 301 | PASS |
+| 4 | 50 | 950 | 0 | 50 | 242 | PASS |
+| 5 | 50 | 950 | 0 | 50 | 217 | PASS |
+| 6 | 50 | 950 | 0 | 50 | 265 | PASS |
+| 7 | 50 | 950 | 0 | 50 | 217 | PASS |
+| 8 | 50 | 950 | 0 | 50 | 215 | PASS |
+| 9 | 50 | 950 | 0 | 50 | 208 | PASS |
+| 10 | 50 | 950 | 0 | 50 | 277 | PASS |
+
+**10/10 iterations passed.** Every iteration: exactly 50 accepted, exactly 950
+`SOLD_OUT`, Redis stock counter at exactly `0` (never negative), exactly 50 rows in
+`purchases` — the durable record and the live counter agree with each other and with
+the configured stock in every run. Average iteration wall time 257ms for 1,000
+concurrent requests, ≈3,890 req/s aggregate across all 10,000 requests in the run.
+
+**Duplicate-user test** — one identifier, 100 concurrent requests: exactly 1 accepted,
+99 `ALREADY_PURCHASED`, exactly 1 row in `purchases`. PASS.
+
+**Boundary test** — one request against a sale before `startsAt`: `403
+SALE_NOT_STARTED`. One request against a sale after `endsAt`: `410 SALE_ENDED`. Both
+PASS.
+
+**Interpretation.** No run, at any iteration, showed more than `S` acceptances or a
+negative/mismatched stock count — the Lua script's atomicity held under every trial,
+which is the actual claim this test needs to prove (section 4.1's point: a throughput
+number alone doesn't demonstrate correctness, repeated invariant checks do).
+Throughput itself (≈3,900 req/s from a single Node process, single Redis instance, and
+Postgres over Docker's loopback network on a laptop) is not the ceiling of this
+architecture — it's the ceiling of this specific run. The bottleneck is not the atomic
+decision itself (Redis executes the Lua script in well under a millisecond); it's the
+synchronous per-request path through Fastify → Redis round trip → Postgres insert →
+HTTP response, serialized per request by Node's event loop and the `postgres-js`
+connection pool (`DB_POOL_MAX`, default 10, raised for this run — see `.env`). Raising
+`DB_POOL_MAX`, running the backend across multiple processes behind a load balancer,
+or moving the Postgres insert off the request's critical path (see "What I would do
+differently," the message-queue item) would each raise this ceiling without touching
+the correctness mechanism, which is the point: throughput and correctness are
+separable here by construction, and this run is evidence for the second, not a claim
+about the first.
+
+### 10x concurrency: stress-testing the stress test's own assumptions
+
+The run above used `N = 1,000` — comfortably past the brief's "thousands of users,"
+but still worth checking what happens at an order of magnitude higher, and whether the
+invariant is really independent of `N` the way Decision 1 claims. Re-run with
+`STRESS_TEST_CONCURRENCY=10000` (`N = 10,000` concurrent distinct identifiers per
+iteration, same `S = 50`, 10 iterations), against a **production build**
+(`npm run build && npm run start`, not the `nest start --watch` dev server) with
+`DB_POOL_MAX=100`:
+
+| Iter | Accepted | Sold out | Redis stock | DB rows | Duration (ms) | Result |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 9,950 | 0 | 50 | 5,655 | PASS |
+| 2 | 50 | 9,950 | 0 | 50 | 5,733 | PASS |
+| 3 | 50 | 9,950 | 0 | 50 | 5,292 | PASS |
+| 4 | 50 | 9,950 | 0 | 50 | 5,455 | PASS |
+| 5 | 50 | 9,950 | 0 | 50 | 5,118 | PASS |
+| 6 | 50 | 9,950 | 0 | 50 | 5,115 | PASS |
+| 7 | 50 | 9,950 | 0 | 50 | 5,197 | PASS |
+| 8 | 50 | 9,950 | 0 | 50 | 5,009 | PASS |
+| 9 | 50 | 9,950 | 0 | 50 | 5,232 | PASS |
+| 10 | 50 | 9,950 | 0 | 50 | 5,173 | PASS |
+
+**10/10 passed at 10x the concurrency.** Still exactly 50 accepted, exactly 9,950
+`SOLD_OUT`, stock at exactly `0`, 50 DB rows — every iteration, same as at `N = 1,000`.
+This is the actual point of Decision 1's claim: the invariant doesn't degrade as `N`
+grows, because the atomic unit is the Lua script's single execution per request, not
+some property of the batch size. What *does* change with `N` is throughput per
+request: aggregate throughput dropped to ≈1,890 req/s (from ≈3,890 req/s at
+`N = 1,000`), and average iteration wall time rose from 257ms to ≈5.2s for 10,000
+requests. That drop is consistent with the Interpretation above — it's the HTTP/DB
+connection layer absorbing more concurrent in-flight requests, not the correctness
+mechanism weakening.
+
+**Why the plain default run at `N = 10,000` isn't reproducible out of the box:** the
+first attempt at this run (against the dev server, default `DB_POOL_MAX=10`) crashed
+outright with `SocketError: other side closed` / `UND_ERR_SOCKET` mid-run — 10,000
+simultaneous connections queueing behind a 10-connection Postgres pool and the OS's
+own ephemeral-port/file-descriptor limits, not a bug in the purchase logic. This is
+the same class of problem the CI `ECONNRESET` fix (see Testing above) already
+diagnosed at a smaller scale (30 concurrent). The successful run above needed
+`DB_POOL_MAX=100` and a production build (no dev-mode compiler watcher overhead)
+to avoid it — which is itself part of the point: **the bottleneck at very high `N` is
+resource provisioning (connection pool size, file descriptor limits, process count),
+and it's diagnosable and fixable through configuration, without touching the atomic
+decision.** This also surfaced one real, separate bug while chasing it down: the same
+attempt to raise `HTTP_KEEP_ALIVE_TIMEOUT_MS`/`HTTP_CONNECTION_TIMEOUT_MS` via env var
+crashed the server with `TypeError [ERR_INVALID_ARG_TYPE]` — `ConfigService`'s
+`get<number>(...)` calls were a compile-time type assertion only, not a runtime cast,
+so an env var string reached Node's `setTimeout` as a string. Fixed by wrapping each
+numeric getter in `Number(...)` in `src/config/config.service.ts`.
 
 ## Known limitations
 
@@ -482,11 +610,15 @@ at least ten times, not once.
   confirm/rollback state machine — complexity that isn't justified at this scale.
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
-- **High-`N` stress tests don't exist yet.** The oversell and duplicate-user
-  invariants are covered by the automated integration suite at small `N` (`30` and
-  `10`), which is enough to prove the atomicity mechanism itself is correct, but not
-  enough to produce a throughput number. A k6/autocannon run at realistic concurrency
-  is still needed for the Stress test results section.
+- **The stress test runs against one backend process and one Redis instance, on a
+  single laptop.** The results in Stress test results above are real and the
+  invariants held on every run — at both `N = 1,000` and `N = 10,000` — but the
+  throughput numbers specifically reflect this one machine's Docker networking
+  overhead and a single Node event loop, not a ceiling on the architecture. At
+  `N = 10,000` the default `DB_POOL_MAX=10` wasn't enough to avoid connections being
+  dropped outright (see the "10x concurrency" subsection above) — a real,
+  config-level resource limit, not a logic bug, but worth knowing before assuming the
+  defaults scale unmodified past a few thousand concurrent requests.
 - **Path aliasing (`src/...` absolute imports) needed extra wiring beyond `tsconfig.json`
   alone.** TypeScript's `paths` only affects compile-time resolution, not runtime — so
   `ts-jest` needed a matching `moduleNameMapper`, and `nest build`'s output needed

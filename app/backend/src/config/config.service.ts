@@ -7,27 +7,27 @@ export default class ConfigService {
 
   app() {
     return {
-      port: this.config.get<number>("PORT", 3000),
-      keepAliveTimeout: this.config.get<number>("HTTP_KEEP_ALIVE_TIMEOUT_MS", 30_000),
-      connectionTimeout: this.config.get<number>("HTTP_CONNECTION_TIMEOUT_MS", 30_000),
+      port: Number(this.config.get<number>("PORT", 3000)),
+      keepAliveTimeout: Number(this.config.get<number>("HTTP_KEEP_ALIVE_TIMEOUT_MS", 30_000)),
+      connectionTimeout: Number(this.config.get<number>("HTTP_CONNECTION_TIMEOUT_MS", 30_000)),
     };
   }
 
   database() {
     return {
       host: this.config.get<string>("DB_HOST", "localhost"),
-      port: this.config.get<number>("DB_PORT", 5432),
+      port: Number(this.config.get<number>("DB_PORT", 5432)),
       database: this.config.get<string>("DB_NAME", "flash_sale"),
       username: this.config.get<string>("DB_USERNAME", "postgres"),
       password: this.config.get<string>("DB_PASSWORD", "postgres"),
-      poolMax: this.config.get<number>("DB_POOL_MAX", 10),
+      poolMax: Number(this.config.get<number>("DB_POOL_MAX", 10)),
     };
   }
 
   redis() {
     return {
       host: this.config.get<string>("REDIS_HOST", "localhost"),
-      port: this.config.get<number>("REDIS_PORT", 6379),
+      port: Number(this.config.get<number>("REDIS_PORT", 6379)),
     };
   }
   // add more config getters as needed

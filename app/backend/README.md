@@ -102,8 +102,9 @@ system needs — no CQRS, no extra modules for the sake of structure.
 - Done — Integration tests (`flash-sale.integration.test.ts`) against real Postgres +
   Redis, including the oversell (30 concurrent, stock 5) and duplicate-user (10
   concurrent, same identifier) invariants.
-- Pending — High-`N` dedicated stress test run (k6/autocannon) with a results table —
-  see root README's Stress test results.
+- Done — High-`N` stress test (`src/flash-sale/stress-test/run.ts`, run via
+  `npm run test:stress`): 10 iterations of stock=50/1000-concurrent-user oversell, all
+  passed, plus duplicate-user and boundary checks. See root README's Stress test results.
 - Pending — ESLint config (the `lint` script exists but there's no config file yet;
   CI runs `tsc --noEmit` instead).
 
@@ -187,6 +188,12 @@ backend is running.
 npm test              # unit — fast, no infrastructure, all deps mocked
 npm run test:coverage # unit, with coverage report
 npm run test:integration  # requires `docker compose ... up -d db redis` + a migrated DB
+npm run test:stress    # requires the above, plus the server itself running (npm run dev)
+
+or
+
+STRESS_TEST_STOCK=50 STRESS_TEST_CONCURRENCY=1000 STRESS_TEST_ITERATIONS=10 STRESS_TEST_DUPLICATE_CONCURRENCY=100 npm run test:stress
+
 ```
 
 Unit tests (`flash-sale.test.ts`) mock `SaleRepository`/`PurchaseRepository`/
@@ -196,7 +203,13 @@ Unit tests (`flash-sale.test.ts`) mock `SaleRepository`/`PurchaseRepository`/
 parallelism reasons — each test seeds and cleans up its own `sales`/`purchases` rows,
 sequencing just avoids cross-test interference). Deliberately not mocking Redis here:
 the whole point of this layer is proving the atomic decision holds against the real
-thing. See the root README's Testing section for what each suite covers in detail.
+thing. The stress test (`src/flash-sale/stress-test/run.ts`) drives the
+real running server over plain HTTP at much higher concurrency (config via
+`STRESS_TEST_STOCK`/`STRESS_TEST_CONCURRENCY`/`STRESS_TEST_ITERATIONS`/
+`STRESS_TEST_DUPLICATE_CONCURRENCY` env vars) and asserts the same oversell/duplicate-
+user/boundary invariants against Postgres and Redis afterward, repeated automatically.
+See the root README's Testing and Stress test results sections for what each suite
+covers in detail and the actual numbers from the last run.
 
 ## Linting
 
