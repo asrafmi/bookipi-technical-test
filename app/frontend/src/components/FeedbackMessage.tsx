@@ -6,7 +6,7 @@ interface FeedbackMessageProps {
   body: string;
 }
 
-export function FeedbackMessage({ tone, title, body }: FeedbackMessageProps) {
+export function FeedbackMessage({ tone, title, body }: Readonly<FeedbackMessageProps>) {
   return (
     <div className={`feedback feedback--${tone}`}>
       <span className="feedback__icon">{tone === "success" ? <CheckIcon /> : null}</span>

@@ -9,7 +9,7 @@ export interface SaleStatus {
   status: SaleWindowStatus;
   productName: string;
   productDescription: string;
-  productImage: string;
+  productImage?: string;
   startsAt: string;
   endsAt: string;
   stockRemaining: number;
@@ -36,13 +36,13 @@ export const PurchaseErrorCode = {
 export type PurchaseErrorCode = (typeof PurchaseErrorCode)[keyof typeof PurchaseErrorCode];
 
 export interface PurchaseSuccess {
-  ok: true;
+  accepted: true;
   identifier: string;
   purchasedAt: string;
 }
 
 export interface PurchaseFailure {
-  ok: false;
+  accepted: false;
   code: PurchaseErrorCode;
   message: string;
 }

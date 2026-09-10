@@ -1,11 +1,11 @@
-import { useCountdown } from "../hooks/useCountdown";
+import { useCountdown } from "../hooks/use-countdown";
 
 interface CountdownTimerProps {
   startLabel: string;
   targetIso: string;
 }
 
-export function CountdownTimer({ startLabel, targetIso }: CountdownTimerProps) {
+export function CountdownTimer({ startLabel, targetIso }: Readonly<CountdownTimerProps>) {
   const { days, hours, minutes, seconds } = useCountdown(targetIso);
 
   return (
@@ -21,7 +21,7 @@ export function CountdownTimer({ startLabel, targetIso }: CountdownTimerProps) {
   );
 }
 
-function CountdownUnit({ value, unit }: { value: string; unit: string }) {
+function CountdownUnit({ value, unit }: Readonly<{ value: string; unit: string }>) {
   return (
     <div className="countdown__unit">
       <div className="countdown__value">{value}</div>
