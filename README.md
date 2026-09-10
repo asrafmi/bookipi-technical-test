@@ -9,8 +9,6 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 
 ## Status
 
-- Done — Frontend: all UI states implemented against a mock API (see [app/frontend/README.md](app/frontend/README.md)).
-  Not yet wired to the real backend.
 - Done — Backend: all three endpoints implemented and exercised end-to-end over HTTP —
   sale status, attempt purchase, and check own purchase result. See API reference below.
 - Done — Backend: the atomic purchase decision (Redis Lua script + synchronous Postgres
@@ -26,7 +24,13 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   a real running Nest app over HTTP, against real Postgres and real Redis — every error
   taxonomy code, the oversell invariant, and the duplicate-user invariant. See Testing
   below.
-- Pending — Frontend wired to the real backend (still talks to its in-memory mock).
+- Done — Frontend wired to the real backend over HTTP (axios) — the in-memory mock has
+  been fully retired. See [app/frontend/README.md](app/frontend/README.md) for the
+  client layer and a known gap in how its API base URL is currently resolved.
+- Done — Production frontend image supports runtime env injection (`window.__ENV__`,
+  substituted into `env-config.js` by the container's entrypoint at startup) so the
+  same built image can point at different backend URLs without a rebuild — see
+  Known limitations for the one file that doesn't use this path yet.
 - Pending — Stress tests at higher concurrency (oversell/duplicate-user proven at small
   N via integration tests; a dedicated k6/autocannon run at realistic N is still needed
   for the results table).
@@ -36,14 +40,15 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 ```bash
 npm run install:all   # installs root, backend, and frontend deps
 cp app/backend/.env.example app/backend/.env
+cp app/frontend/.env.example app/frontend/.env
 docker compose -f app/backend/build/docker/docker-compose.yml up -d db redis
 npm --prefix app/backend run db:migrate   # also seeds the one `sales` row (id: "default")
 npm run dev            # runs backend + frontend concurrently
 ```
 
 Backend starts at `http://localhost:3000` (Swagger docs at `/docs`), frontend at
-`http://localhost:5173`. The frontend still talks to its own in-memory mock API, not
-the backend yet — see [app/frontend/README.md](app/frontend/README.md).
+`http://localhost:5173` and talks to the real backend over HTTP — see
+[app/frontend/README.md](app/frontend/README.md) for the client layer.
 
 The seeded sale (`GET /v1/flash-sale/default/status`) ships with a fixed window — check
 the `INSERT INTO "sales"` statement in `app/backend/src/db/migrations/0001_eminent_tag.sql`
@@ -57,9 +62,10 @@ To run either side alone, see [app/backend/README.md](app/backend/README.md) or
 
 ```
 app/
-  frontend/   React + TypeScript + Vite. See app/frontend/README.md.
-  backend/    NestJS + Fastify + TypeScript API. Boilerplate + one dummy endpoint.
-              See app/backend/README.md.
+  frontend/   React + TypeScript + Vite, wired to the real backend over HTTP.
+              See app/frontend/README.md.
+  backend/    NestJS + Fastify + TypeScript API — all three endpoints, atomic
+              purchase decision, unit + integration tests. See app/backend/README.md.
 ```
 
 ## Architecture
@@ -174,11 +180,14 @@ sequenceDiagram
 To be filled in as decisions are made — this section is written alongside the
 code, not reconstructed afterward. So far:
 
-- **Frontend has no backend dependency yet.** The API client
-  (`app/frontend/src/api/flashSaleApi.ts`) exposes the same three functions the
-  real backend will serve (sale status, attempt purchase, check user status),
-  backed by an in-memory mock. This let UI work start before the backend exists,
-  and means swapping in real `fetch` calls later shouldn't touch any component.
+- **Frontend was built against an in-memory mock before the backend existed, by
+  design.** The API client exposed the same three functions the real backend
+  would serve (sale status, attempt purchase, check user status), so UI work
+  could start immediately without waiting on the backend. This paid off as
+  intended: swapping the mock for real axios calls against the running backend
+  (`app/frontend/src/api/flash-sale/`) touched only the API layer — no component
+  or hook needed to change, since they were already built against the same
+  function signatures and the same discriminated-union result shape.
 - **UI states are derived, not enumerated.** The design spec calls out nine
   distinct screens (upcoming, ready, invalid input, submitting, success, already
   purchased, sold out, ended, request failed). These aren't nine components —
@@ -421,11 +430,20 @@ versus manual so far.
   numbers in the Stress test results section below, run repeatedly since race
   conditions are probabilistic even though the atomicity mechanism itself is already
   covered.
-- Frontend: no test runner installed yet, and not yet wired to the real backend.
+- Frontend: no test runner installed yet.
 - **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
   pull request — backend typecheck, backend unit tests, backend integration tests
   (with real `postgres:16-alpine` and `redis:7-alpine` service containers, migrated
   before the suite runs), and frontend lint + build, as four independent jobs.
+  The integration job sets `DB_POOL_MAX=50`, raised from the app's own default of
+  `10` (postgres-js's default): the 30-concurrent oversell test intermittently hit
+  `ECONNRESET` under GitHub Actions' shared runner, traced to requests queueing
+  behind a too-small connection pool for longer than the HTTP layer's keep-alive
+  window — not a concurrency bug in the purchase logic itself. Both the pool size
+  and the HTTP keep-alive/connection timeouts are `ConfigService`-driven
+  (`DB_POOL_MAX`, `HTTP_KEEP_ALIVE_TIMEOUT_MS`, `HTTP_CONNECTION_TIMEOUT_MS` — see
+  [app/backend/README.md](app/backend/README.md#configuration)), not hardcoded, so
+  this is a config change per environment rather than a code change.
 
 ## Stress test results
 
@@ -444,8 +462,17 @@ at least ten times, not once.
   exists but there's no `.eslintrc`) — CI's backend job runs `tsc --noEmit` instead,
   which catches type errors but not style/lint issues. The frontend's `oxlint` is
   configured and does run in CI.
-- **The frontend is not wired to the real backend yet** — it's still fully built
-  against its own in-memory mock (`app/frontend/src/api/flashSaleApi.ts`).
+- **The frontend's API base URL isn't fully runtime-configurable yet.** The
+  production Docker image injects `VITE_FLASH_SALE_*` at container startup via
+  `window.__ENV__` (see `app/frontend/src/lib/config.ts`), so the same built image
+  can be repointed at a different backend without a rebuild. But
+  `app/frontend/src/api/flash-sale/flash-sale-client.ts` — the file that actually
+  constructs the axios instance used for every API call — reads
+  `import.meta.env.VITE_FLASH_SALE_API_BASE_URL` directly instead of going through
+  `lib/config.ts`, so in practice the API base URL is still baked in at build time
+  for that one call site. Works today because the build-time and runtime values
+  happen to match in this setup; would need `flash-sale-client.ts` switched over to
+  `lib/config.ts` before one image could safely serve multiple environments.
 - **The Redis decrement and the Postgres insert are not atomic with each other.**
   If the process dies between the two, one unit of stock is lost — the system
   undersells, it does not oversell. This is a deliberate trade-off, not an oversight:
