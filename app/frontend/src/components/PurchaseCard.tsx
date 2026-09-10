@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { CountdownTimer } from "./CountdownTimer";
 import { FeedbackMessage } from "./FeedbackMessage";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
-import { isValidIdentifier, useFlashSale } from "../hooks/useFlashSale";
+import { isValidIdentifier, useFlashSale } from "../hooks/use-flash-sale";
 
 const DATE_FORMAT: Intl.DateTimeFormatOptions = {
   weekday: "short",
@@ -74,7 +74,7 @@ export function PurchaseCard() {
   return (
     <div className="card">
       <div className="card__media">
-        <img className="card__image" src={saleStatus.productImage} alt={saleStatus.productName} />
+        <img className="card__image" src={saleStatus.productImage || 'Lionel Messi Premium Kit.jpg'} alt={saleStatus.productName} />
       </div>
 
       <div className="card__content">

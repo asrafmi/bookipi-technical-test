@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { attemptPurchase, fetchSaleStatus } from "../api/flashSaleApi";
-import { SubmitState, type PurchaseFailure, type SaleStatus } from "../types/flashSale";
+import { attemptPurchase, getFlashSaleStatus } from "../api/flash-sale/flash-sale";
+import { SubmitState, type PurchaseFailure, type SaleStatus } from "../types/flash-sale";
+import { config } from "../lib/config";
 
 interface FlashSaleState {
   saleStatus: SaleStatus | null;
@@ -17,6 +18,7 @@ export function isValidIdentifier(value: string): boolean {
 }
 
 export function useFlashSale() {
+  const { flashSale } = config;
   const [state, setState] = useState<FlashSaleState>({
     saleStatus: null,
     identifier: "",
@@ -26,9 +28,9 @@ export function useFlashSale() {
   });
 
   const refreshStatus = useCallback(async () => {
-    const saleStatus = await fetchSaleStatus();
+    const saleStatus = await getFlashSaleStatus(flashSale.defaultSaleId);
     setState((prev) => ({ ...prev, saleStatus }));
-  }, []);
+  }, [flashSale.defaultSaleId]);
 
   useEffect(() => {
     refreshStatus();
@@ -44,7 +46,7 @@ export function useFlashSale() {
     setState((prev) => ({ ...prev, submitState: SubmitState.SUBMITTING, failure: null }));
 
     const trimmed = state.identifier.trim();
-    const result = await attemptPurchase(trimmed);
+    const result = await attemptPurchase(flashSale.defaultSaleId, trimmed);
 
     if (result.ok) {
       setState((prev) => ({
@@ -58,7 +60,7 @@ export function useFlashSale() {
     } else {
       setState((prev) => ({ ...prev, submitState: SubmitState.FAILURE, failure: result }));
     }
-  }, [state.identifier]);
+  }, [state.identifier, flashSale.defaultSaleId]);
 
   return {
     saleStatus: state.saleStatus,

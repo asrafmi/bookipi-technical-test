@@ -9,7 +9,7 @@ export interface SaleStatus {
   status: SaleWindowStatus;
   productName: string;
   productDescription: string;
-  productImage: string;
+  productImage?: string;
   startsAt: string;
   endsAt: string;
   stockRemaining: number;

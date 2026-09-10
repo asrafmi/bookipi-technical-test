@@ -8,12 +8,13 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "docker:up": "docker compose -f build/docker/docker-compose.yml -f build/docker/docker-compose.override.yml up -d",
+    "docker:up": "docker compose -f build/docker/docker-compose.yml up -d",
     "docker:up:prod": "docker compose -f build/docker/docker-compose.yml up -d",
-    "docker:down": "docker compose -f build/docker/docker-compose.yml -f build/docker/docker-compose.override.yml down",
-    "docker:logs": "docker compose -f build/docker/docker-compose.yml -f build/docker/docker-compose.override.yml logs -f"
+    "docker:down": "docker compose -f build/docker/docker-compose.yml down",
+    "docker:logs": "docker compose -f build/docker/docker-compose.yml logs -f"
   },
   "dependencies": {
+    "axios": "^1.20.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
