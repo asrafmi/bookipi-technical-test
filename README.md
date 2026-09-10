@@ -19,7 +19,9 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 - Done — Backend: sale configuration (product name, stock, window) lives in a `sales`
   table, seeded by migration with a fixed id (`default`) rather than env vars — see
   Decision 6 below.
-- Done — Backend: unit tests for the sale window logic (`flash-sale.test.ts`).
+- Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`) — sale
+  window boundaries plus `attemptPurchase`/`getSaleStatus`/`checkPurchaseStatus` with
+  `SaleRepository`/`PurchaseRepository`/`PurchaseGateway` mocked via `jest.fn()`.
 - Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
   a real running Nest app over HTTP, against real Postgres and real Redis — every error
   taxonomy code, the oversell invariant, and the duplicate-user invariant. See Testing
@@ -369,10 +371,18 @@ versus manual so far.
 
 ## Testing
 
-- **Unit (automated):** `flash-sale.test.ts` covers the sale window boundary logic
-  (`resolveWindowStatus`) — before `startsAt`, exactly at `startsAt`, exactly at
-  `endsAt`, and just after `endsAt`. No infrastructure needed. Run with
-  `npm run test:backend` (or `npm --prefix app/backend run test`).
+- **Unit (automated):** `flash-sale.test.ts` covers `FlashSaleService` in isolation —
+  `SaleRepository`, `PurchaseRepository`, and `PurchaseGateway` are all mocked with
+  `jest.fn()`, so this suite is fast and needs no infrastructure. Covers: the sale
+  window boundary logic (`resolveWindowStatus` — before/at/after `startsAt`/`endsAt`);
+  `getSaleStatus`'s `NotFoundException` and stock-remaining math (including the
+  `Math.max(..., 0)` floor when purchased count would otherwise push it negative);
+  `attemptPurchase`'s full branch set — gateway bootstrap args, a successful purchase,
+  each gateway rejection code (`SALE_NOT_STARTED`/`SALE_ENDED`/`SOLD_OUT`/`ALREADY_PURCHASED`)
+  passed through without touching the repository, the gateway-accepted-but-DB-unique-
+  constraint-already-held-a-row case, and the compensate-then-`TEMPORARY_FAILURE` path
+  when the DB write throws; and `checkPurchaseStatus`'s found/`NOT_PURCHASED` branches.
+  Run with `npm run test:backend` (or `npm --prefix app/backend run test`).
 - **Integration (automated):** `flash-sale.integration.test.ts` boots the real Nest
   application (Fastify adapter, same `ValidationPipe` as `main.ts`) and drives it over
   HTTP with `supertest`, against the real Postgres and Redis started by

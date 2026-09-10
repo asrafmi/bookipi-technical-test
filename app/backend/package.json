@@ -7,6 +7,7 @@
     "dev": "nest start --watch",
     "start": "node dist/main.js",
     "test": "jest --passWithNoTests --testPathIgnorePatterns=integration.test.ts",
+    "test:coverage": "jest --passWithNoTests --testPathIgnorePatterns=integration.test.ts --coverage",
     "test:integration": "jest --passWithNoTests --testRegex=integration.test.ts$ --runInBand",
     "lint": "eslint \"src/**/*.ts\"",
     "db:generate": "drizzle-kit generate",
@@ -66,6 +67,11 @@
     "moduleNameMapper": {
       "^src/(.*)$": "<rootDir>/$1"
     },
-    "testTimeout": 15000
+    "testTimeout": 15000,
+    "collectCoverageFrom": [
+      "flash-sale/domain/**/*.ts",
+      "!flash-sale/domain/**/*.test.ts",
+      "!flash-sale/domain/**/*.interface.ts"
+    ]
   }
 }

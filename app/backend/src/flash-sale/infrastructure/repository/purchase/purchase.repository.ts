@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import awaitToError from "src/common/error/await-to-error";
 import { DRIZZLE_CLIENT } from "src/db/database.module";
 import { DrizzleClient } from "src/db/client";
-import { NewPurchaseRow, purchases } from "./purchase.entity";
+import { NewPurchaseRow, purchases, PurchaseRow } from "./purchase.entity";
 
 @Injectable()
 export class PurchaseRepository {
@@ -19,7 +19,7 @@ export class PurchaseRepository {
     return this.db.$count(purchases, eq(purchases.saleId, saleId));
   }
 
-  async insertIfNotExists(input: NewPurchaseRow) {
+  async insertIfNotExists(input: NewPurchaseRow): Promise<PurchaseRow | null> {
     const [err, result] = await awaitToError(
       this.db.insert(purchases).values(input).onConflictDoNothing().returning(),
     );
