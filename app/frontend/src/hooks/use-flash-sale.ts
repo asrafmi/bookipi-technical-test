@@ -4,6 +4,9 @@ import { SubmitState, type PurchaseFailure, type PurchaseResult, type SaleStatus
 import { config } from "../lib/config";
 import awaitToError from "../lib/await-to-error";
 import type { ErrorResponse } from "../types/error";
+import { derivePurchaseCardView } from "../domains/flash-sale";
+
+export { isValidIdentifier } from "../domains/flash-sale";
 
 interface FlashSaleState {
   saleStatus: SaleStatus | null;
@@ -11,12 +14,6 @@ interface FlashSaleState {
   submitState: SubmitState;
   failure: PurchaseFailure | null;
   successIdentifier: string | null;
-}
-
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-export function isValidIdentifier(value: string): boolean {
-  return EMAIL_PATTERN.test(value.trim());
 }
 
 export function useFlashSale() {
@@ -68,6 +65,16 @@ export function useFlashSale() {
 
   }, [state.identifier, flashSale.defaultSaleId]);
 
+  const view = state.saleStatus
+    ? derivePurchaseCardView({
+        saleStatus: state.saleStatus,
+        identifier: state.identifier,
+        submitState: state.submitState,
+        failure: state.failure,
+        successIdentifier: state.successIdentifier,
+      })
+    : null;
+
   return {
     saleStatus: state.saleStatus,
     identifier: state.identifier,
@@ -76,5 +83,6 @@ export function useFlashSale() {
     failure: state.failure,
     successIdentifier: state.successIdentifier,
     submitPurchase,
+    view,
   };
 }

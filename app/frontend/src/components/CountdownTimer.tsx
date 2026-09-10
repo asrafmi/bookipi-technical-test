@@ -21,7 +21,7 @@ export function CountdownTimer({ startLabel, targetIso }: Readonly<CountdownTime
   );
 }
 
-function CountdownUnit({ value, unit }: { value: string; unit: string }) {
+function CountdownUnit({ value, unit }: Readonly<{ value: string; unit: string }>) {
   return (
     <div className="countdown__unit">
       <div className="countdown__value">{value}</div>
