@@ -8,6 +8,8 @@ export default class ConfigService {
   app() {
     return {
       port: this.config.get<number>("PORT", 3000),
+      keepAliveTimeout: this.config.get<number>("HTTP_KEEP_ALIVE_TIMEOUT_MS", 30_000),
+      connectionTimeout: this.config.get<number>("HTTP_CONNECTION_TIMEOUT_MS", 30_000),
     };
   }
 
@@ -18,6 +20,7 @@ export default class ConfigService {
       database: this.config.get<string>("DB_NAME", "flash_sale"),
       username: this.config.get<string>("DB_USERNAME", "postgres"),
       password: this.config.get<string>("DB_PASSWORD", "postgres"),
+      poolMax: this.config.get<number>("DB_POOL_MAX", 10),
     };
   }
 

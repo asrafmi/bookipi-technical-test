@@ -73,6 +73,7 @@ jobs:
       DB_NAME: flash_sale
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
+      DB_POOL_MAX: "50"
       REDIS_HOST: localhost
       REDIS_PORT: 6379
     steps:

@@ -12,6 +12,7 @@ import { RedisClient } from "src/redis/redis.client";
 import { purchases, sales } from "src/db/schema";
 import { PurchaseErrorCode } from "src/flash-sale/types/purchase";
 import { SaleWindowStatus } from "src/flash-sale/types/sale-status";
+import ConfigService from "src/config/config.service";
 
 // Hits a real, running NestJS app backed by real Postgres and Redis (started via
 // `npm run docker:up` from app/backend). Per section 4.3: mocking Redis here would
@@ -53,7 +54,10 @@ describe("FlashSaleController (integration)", () => {
       imports: [AppModule],
     }).compile();
 
-    app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
+    const { keepAliveTimeout, connectionTimeout } = moduleRef.get(ConfigService).app();
+    app = moduleRef.createNestApplication<NestFastifyApplication>(
+      new FastifyAdapter({ keepAliveTimeout, connectionTimeout }),
+    );
     // Mirrors main.ts's bootstrap() — the testing module doesn't run bootstrap(),
     // so the global ValidationPipe must be wired up here too, or DTO validation
     // (and its 400 responses) silently never runs against this test instance.

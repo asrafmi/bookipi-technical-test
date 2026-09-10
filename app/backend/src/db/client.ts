@@ -10,6 +10,7 @@ export function createDrizzleClient(config: {
   database: string;
   username: string;
   password: string;
+  poolMax: number;
 }): DrizzleClient {
   const queryClient = postgres({
     host: config.host,
@@ -17,6 +18,7 @@ export function createDrizzleClient(config: {
     database: config.database,
     username: config.username,
     password: config.password,
+    max: config.poolMax,
   });
   return drizzle(queryClient, { schema });
 }

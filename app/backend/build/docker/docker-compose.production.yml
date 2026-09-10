@@ -15,6 +15,12 @@ services:
       # Postgres and Redis are reachable by service name, not localhost
       - DB_HOST=db
       - REDIS_HOST=redis
+      # Prod is expected to take real concurrent purchase load (see the oversell
+      # test in flash-sale.integration.test.ts) — the postgres-js/Fastify defaults
+      # this app falls back to otherwise are sized for light/local use.
+      - DB_POOL_MAX=${DB_POOL_MAX:-50}
+      - HTTP_KEEP_ALIVE_TIMEOUT_MS=${HTTP_KEEP_ALIVE_TIMEOUT_MS:-30000}
+      - HTTP_CONNECTION_TIMEOUT_MS=${HTTP_CONNECTION_TIMEOUT_MS:-30000}
     ports:
       - "${PORT:-3000}:3000"
     depends_on:
