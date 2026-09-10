@@ -36,17 +36,35 @@ export class PurchaseGateway implements OnModuleInit {
   }
 
   async attemptPurchase(saleId: string, identifier: string, now: Date, startsAt: Date, endsAt: Date): Promise<PurchaseGatewayResult> {
-    const outcome = await (this.redis as any).attemptPurchase(
-      this.stockKey(saleId),
-      this.buyersKey(saleId),
-      identifier,
-      now.getTime(),
-      startsAt.getTime(),
-      endsAt.getTime()
-    );
+    // TEMPORARY — deliberately broken for a stress-test demo. This reintroduces the
+    // exact "classic failure" section 2.1 of the working notes warns about: three
+    // separate steps (window check, stock check, dedup) followed by a write, instead
+    // of the one atomic EVALSHA below. Under real concurrency, many requests can pass
+    // the stock check before any of them decrements — expect oversell.
+    if (now.getTime() < startsAt.getTime()) return { accepted: false, code: PurchaseErrorCode.SALE_NOT_STARTED };
+    if (now.getTime() > endsAt.getTime()) return { accepted: false, code: PurchaseErrorCode.SALE_ENDED };
 
-    if (outcome === "OK") return { accepted: true };
-    return { accepted: false, code: PurchaseErrorCode[outcome as keyof typeof PurchaseErrorCode] };
+    const isBuyer = await this.redis.sismember(this.buyersKey(saleId), identifier);
+    if (isBuyer) return { accepted: false, code: PurchaseErrorCode.ALREADY_PURCHASED };
+
+    const stock = Number(await this.redis.get(this.stockKey(saleId)));
+    if (!stock || stock <= 0) return { accepted: false, code: PurchaseErrorCode.SOLD_OUT };
+
+    await this.redis.decr(this.stockKey(saleId));
+    await this.redis.sadd(this.buyersKey(saleId), identifier);
+    return { accepted: true };
+
+    // Original atomic version (restore this, delete the block above):
+    // const outcome = await (this.redis as any).attemptPurchase(
+    //   this.stockKey(saleId),
+    //   this.buyersKey(saleId),
+    //   identifier,
+    //   now.getTime(),
+    //   startsAt.getTime(),
+    //   endsAt.getTime()
+    // );
+    // if (outcome === "OK") return { accepted: true };
+    // return { accepted: false, code: PurchaseErrorCode[outcome as keyof typeof PurchaseErrorCode] };
   }
 
   async compensate(saleId: string, identifier: string) {
