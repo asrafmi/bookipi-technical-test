@@ -425,7 +425,7 @@ versus manual so far.
   combination was originally verified by hand via `curl` before the integration suite
   existed. Left as a historical note — the integration tests are now the source of
   truth for this.
-- **Stress (automated, own script):** `app/backend/src/flash-sale/stress-test/run-stress-test.ts`,
+- **Stress (automated, own script):** `app/backend/src/flash-sale/stress-test/run.ts`,
   run with `npm run test:stress` (or `npm --prefix app/backend run test:stress`).
   Deliberately not k6/autocannon — those tools measure throughput, not correctness, and
   section 4.1 of the working notes is explicit that a stress test must assert
@@ -532,6 +532,58 @@ the correctness mechanism, which is the point: throughput and correctness are
 separable here by construction, and this run is evidence for the second, not a claim
 about the first.
 
+### 10x concurrency: stress-testing the stress test's own assumptions
+
+The run above used `N = 1,000` — comfortably past the brief's "thousands of users,"
+but still worth checking what happens at an order of magnitude higher, and whether the
+invariant is really independent of `N` the way Decision 1 claims. Re-run with
+`STRESS_TEST_CONCURRENCY=10000` (`N = 10,000` concurrent distinct identifiers per
+iteration, same `S = 50`, 10 iterations), against a **production build**
+(`npm run build && npm run start`, not the `nest start --watch` dev server) with
+`DB_POOL_MAX=100`:
+
+| Iter | Accepted | Sold out | Redis stock | DB rows | Duration (ms) | Result |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 9,950 | 0 | 50 | 5,655 | PASS |
+| 2 | 50 | 9,950 | 0 | 50 | 5,733 | PASS |
+| 3 | 50 | 9,950 | 0 | 50 | 5,292 | PASS |
+| 4 | 50 | 9,950 | 0 | 50 | 5,455 | PASS |
+| 5 | 50 | 9,950 | 0 | 50 | 5,118 | PASS |
+| 6 | 50 | 9,950 | 0 | 50 | 5,115 | PASS |
+| 7 | 50 | 9,950 | 0 | 50 | 5,197 | PASS |
+| 8 | 50 | 9,950 | 0 | 50 | 5,009 | PASS |
+| 9 | 50 | 9,950 | 0 | 50 | 5,232 | PASS |
+| 10 | 50 | 9,950 | 0 | 50 | 5,173 | PASS |
+
+**10/10 passed at 10x the concurrency.** Still exactly 50 accepted, exactly 9,950
+`SOLD_OUT`, stock at exactly `0`, 50 DB rows — every iteration, same as at `N = 1,000`.
+This is the actual point of Decision 1's claim: the invariant doesn't degrade as `N`
+grows, because the atomic unit is the Lua script's single execution per request, not
+some property of the batch size. What *does* change with `N` is throughput per
+request: aggregate throughput dropped to ≈1,890 req/s (from ≈3,890 req/s at
+`N = 1,000`), and average iteration wall time rose from 257ms to ≈5.2s for 10,000
+requests. That drop is consistent with the Interpretation above — it's the HTTP/DB
+connection layer absorbing more concurrent in-flight requests, not the correctness
+mechanism weakening.
+
+**Why the plain default run at `N = 10,000` isn't reproducible out of the box:** the
+first attempt at this run (against the dev server, default `DB_POOL_MAX=10`) crashed
+outright with `SocketError: other side closed` / `UND_ERR_SOCKET` mid-run — 10,000
+simultaneous connections queueing behind a 10-connection Postgres pool and the OS's
+own ephemeral-port/file-descriptor limits, not a bug in the purchase logic. This is
+the same class of problem the CI `ECONNRESET` fix (see Testing above) already
+diagnosed at a smaller scale (30 concurrent). The successful run above needed
+`DB_POOL_MAX=100` and a production build (no dev-mode compiler watcher overhead)
+to avoid it — which is itself part of the point: **the bottleneck at very high `N` is
+resource provisioning (connection pool size, file descriptor limits, process count),
+and it's diagnosable and fixable through configuration, without touching the atomic
+decision.** This also surfaced one real, separate bug while chasing it down: the same
+attempt to raise `HTTP_KEEP_ALIVE_TIMEOUT_MS`/`HTTP_CONNECTION_TIMEOUT_MS` via env var
+crashed the server with `TypeError [ERR_INVALID_ARG_TYPE]` — `ConfigService`'s
+`get<number>(...)` calls were a compile-time type assertion only, not a runtime cast,
+so an env var string reached Node's `setTimeout` as a string. Fixed by wrapping each
+numeric getter in `Number(...)` in `src/config/config.service.ts`.
+
 ## Known limitations
 
 - **The backend has no ESLint config yet** (`app/backend`'s `npm run lint` script
@@ -558,12 +610,15 @@ about the first.
   confirm/rollback state machine — complexity that isn't justified at this scale.
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
-- **The stress test runs against one backend process, one Redis instance, and a
-  default-sized connection pool, on a single laptop.** The results in Stress test
-  results above are real and the invariants held on every run, but the throughput
-  number specifically reflects this one machine's Docker networking overhead and a
-  single Node event loop — not a ceiling on the architecture. See that section's
-  Interpretation for what would need to change to push it higher.
+- **The stress test runs against one backend process and one Redis instance, on a
+  single laptop.** The results in Stress test results above are real and the
+  invariants held on every run — at both `N = 1,000` and `N = 10,000` — but the
+  throughput numbers specifically reflect this one machine's Docker networking
+  overhead and a single Node event loop, not a ceiling on the architecture. At
+  `N = 10,000` the default `DB_POOL_MAX=10` wasn't enough to avoid connections being
+  dropped outright (see the "10x concurrency" subsection above) — a real,
+  config-level resource limit, not a logic bug, but worth knowing before assuming the
+  defaults scale unmodified past a few thousand concurrent requests.
 - **Path aliasing (`src/...` absolute imports) needed extra wiring beyond `tsconfig.json`
   alone.** TypeScript's `paths` only affects compile-time resolution, not runtime — so
   `ts-jest` needed a matching `moduleNameMapper`, and `nest build`'s output needed

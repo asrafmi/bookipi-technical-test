@@ -9,7 +9,7 @@
     "test": "jest --passWithNoTests --testPathIgnorePatterns=integration.test.ts",
     "test:coverage": "jest --passWithNoTests --testPathIgnorePatterns=integration.test.ts --coverage",
     "test:integration": "jest --passWithNoTests --testRegex=integration.test.ts$ --runInBand",
-    "test:stress": "ts-node -r tsconfig-paths/register src/flash-sale/stress-test/run-stress-test.ts",
+    "test:stress": "ts-node -r tsconfig-paths/register src/flash-sale/stress-test/run.ts",
     "lint": "eslint \"src/**/*.ts\"",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
