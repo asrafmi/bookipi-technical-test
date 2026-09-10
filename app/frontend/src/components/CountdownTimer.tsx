@@ -5,7 +5,7 @@ interface CountdownTimerProps {
   targetIso: string;
 }
 
-export function CountdownTimer({ startLabel, targetIso }: CountdownTimerProps) {
+export function CountdownTimer({ startLabel, targetIso }: Readonly<CountdownTimerProps>) {
   const { days, hours, minutes, seconds } = useCountdown(targetIso);
 
   return (

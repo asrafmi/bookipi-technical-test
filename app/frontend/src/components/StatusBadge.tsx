@@ -5,7 +5,7 @@ interface StatusBadgeProps {
   tone: BadgeTone;
 }
 
-export function StatusBadge({ label, tone }: StatusBadgeProps) {
+export function StatusBadge({ label, tone }: Readonly<StatusBadgeProps>) {
   return (
     <span className={`badge badge--${tone}`}>
       <span className="badge__dot" />

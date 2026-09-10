@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { attemptPurchase, getFlashSaleStatus } from "../api/flash-sale/flash-sale";
-import { SubmitState, type PurchaseFailure, type SaleStatus } from "../types/flash-sale";
+import { SubmitState, type PurchaseFailure, type PurchaseResult, type SaleStatus } from "../types/flash-sale";
 import { config } from "../lib/config";
+import awaitToError from "../lib/await-to-error";
+import type { ErrorResponse } from "../types/error";
 
 interface FlashSaleState {
   saleStatus: SaleStatus | null;
@@ -46,20 +48,24 @@ export function useFlashSale() {
     setState((prev) => ({ ...prev, submitState: SubmitState.SUBMITTING, failure: null }));
 
     const trimmed = state.identifier.trim();
-    const result = await attemptPurchase(flashSale.defaultSaleId, trimmed);
-
-    if (result.ok) {
-      setState((prev) => ({
-        ...prev,
-        submitState: SubmitState.SUCCESS,
-        successIdentifier: result.identifier,
-        saleStatus: prev.saleStatus
-          ? { ...prev.saleStatus, stockRemaining: Math.max(0, prev.saleStatus.stockRemaining - 1) }
-          : prev.saleStatus,
-      }));
-    } else {
-      setState((prev) => ({ ...prev, submitState: SubmitState.FAILURE, failure: result }));
+    const [err, result] = await awaitToError<ErrorResponse, PurchaseResult>(attemptPurchase(flashSale.defaultSaleId, trimmed));
+    if (err) {
+      setState((prev) => ({ ...prev, submitState: SubmitState.FAILURE, failure: { accepted: false, code: err.code, message: err.message } }));
+      return;
     }
+    if (!result.accepted) {
+      setState((prev) => ({ ...prev, submitState: SubmitState.FAILURE, failure: result }));
+      return;
+    }
+    setState((prev) => ({
+      ...prev,
+      submitState: SubmitState.SUCCESS,
+      successIdentifier: result.identifier,
+      saleStatus: prev.saleStatus
+        ? { ...prev.saleStatus, stockRemaining: Math.max(0, prev.saleStatus.stockRemaining - 1) }
+        : prev.saleStatus,
+    }));
+
   }, [state.identifier, flashSale.defaultSaleId]);
 
   return {

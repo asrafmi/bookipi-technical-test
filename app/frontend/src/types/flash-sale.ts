@@ -36,13 +36,13 @@ export const PurchaseErrorCode = {
 export type PurchaseErrorCode = (typeof PurchaseErrorCode)[keyof typeof PurchaseErrorCode];
 
 export interface PurchaseSuccess {
-  ok: true;
+  accepted: true;
   identifier: string;
   purchasedAt: string;
 }
 
 export interface PurchaseFailure {
-  ok: false;
+  accepted: false;
   code: PurchaseErrorCode;
   message: string;
 }
