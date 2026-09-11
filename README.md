@@ -722,10 +722,12 @@ numeric getter in `Number(...)` in `src/config/config.service.ts`.
   `node dist/main.js` to work outside of `ts-node`/`nest start`. Worth knowing if this
   pattern gets copied into a project that isn't running everything through Nest's own
   dev server.
-- The dev container's `nest start --watch` shells out to `ps` on file-change restarts,
-  which isn't present in the base image — logs a non-fatal `spawn ps ENOENT` on every
-  hot reload. Doesn't affect correctness (Nest still restarts successfully); would be
-  fixed by installing `procps` in the dev stage if the noise became a problem.
+- The dev-mode container (`docker-compose.override.yml`, running `npm run dev` →
+  `nest start --watch` on the Dockerfile's `base` stage — a plain `node:22-slim`
+  image, no `dev`-specific stage) shells out to `ps` on file-change restarts, which
+  isn't present in that image — logs a non-fatal `spawn ps ENOENT` on every hot
+  reload. Doesn't affect correctness (Nest still restarts successfully); would be
+  fixed by installing `procps` in that stage if the noise became a problem.
 
 ## What I would do differently with more time
 
