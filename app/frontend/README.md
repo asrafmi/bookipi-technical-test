@@ -17,7 +17,7 @@ src/
     http-client.ts            createHttpClient() — builds the AxiosInstance, normalizes
                                every failure response into an ApiError { status, code, message }.
     flash-sale/
-      flash-sale-client.ts     One AxiosInstance scoped to VITE_FLASH_SALE_API_BASE_URL + "/v1".
+      flash-sale-client.ts     One AxiosInstance scoped to lib/config's apiBaseUrl + "/v1".
       flash-sale.ts             getFlashSaleStatus / attemptPurchase / getUserStatus — the
                                  three real backend calls, [err, result] via awaitToError.
   domains/
@@ -47,9 +47,18 @@ component itself contains no derivation logic, only JSX — see `hooks/use-flash
 From the repo root, `npm run dev` starts backend and frontend together (see the
 [root README](../../README.md)). To run just this app:
 
+Installs deps:
 ```bash
 npm install
+```
+
+Prepares the env file:
+```bash
 cp .env.example .env
+```
+
+Runs the dev server:
+```bash
 npm run dev
 ```
 
@@ -62,25 +71,23 @@ README's Quick start for bringing up the backend + its infrastructure.
 `src/api/flash-sale/flash-sale.ts` calls the three real endpoints
 (`GET /v1/flash-sale/:saleId/status`, `POST /v1/flash-sale/:saleId/purchase`,
 `GET /v1/flash-sale/:saleId/purchase/:identifier`) via a shared axios instance
-scoped to `VITE_FLASH_SALE_API_BASE_URL`. `:saleId` comes from
-`VITE_FLASH_SALE_DEFAULT_SALE_ID` (default `"default"`, matching the one seeded sale
+scoped to `config.flashSale.apiBaseUrl` (`lib/config.ts`). `:saleId` comes from
+`config.flashSale.defaultSaleId` (default `"default"`, matching the one seeded sale
 row — see the root README's Decision 6).
+
+Every env-driven value in the frontend goes through `lib/config.ts`, which reads
+`window.__ENV__` first (populated by the production container's entrypoint at
+startup — see the root README's runtime env injection note) and falls back to
+Vite's build-time `import.meta.env` otherwise. No call site reads `import.meta.env`
+directly — this is what makes the runtime injection actually take effect end-to-end,
+not just at the config layer, and what lets one built image be repointed at a
+different backend URL without a rebuild.
 
 Errors follow a go-style `[err, result]` tuple (`lib/await-to-error.ts`), not
 try/catch at the call site — `http-client.ts`'s response interceptor turns any
 non-2xx response into an `ApiError { status, code, message }`, and `use-flash-sale.ts`
 maps that into the same `PurchaseFailure` shape a successful-but-rejected response
 would produce, so the UI doesn't need to know which path a failure came through.
-
-**Known gap:** `lib/config.ts` supports runtime env injection (`window.__ENV__` first,
-falling back to Vite's build-time `import.meta.env`) for the production Docker image —
-see the root README's Known limitations. `api/flash-sale/flash-sale-client.ts` does
-**not** go through that layer yet: it reads `import.meta.env.VITE_FLASH_SALE_API_BASE_URL`
-directly and throws at module load if it's unset. In the current Docker setup this
-still works because Vite's build-time env happens to be set, but it means the
-API base URL is currently baked in at build time for this one file, not
-runtime-injectable like `lib/config.ts` was designed to allow. Worth fixing before
-relying on one built image against multiple backend URLs.
 
 ## Testing
 

@@ -24,13 +24,13 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   a real running Nest app over HTTP, against real Postgres and real Redis — every error
   taxonomy code, the oversell invariant, and the duplicate-user invariant. See Testing
   below.
-- Done — Frontend wired to the real backend over HTTP (axios) — the in-memory mock has
-  been fully retired. See [app/frontend/README.md](app/frontend/README.md) for the
-  client layer and a known gap in how its API base URL is currently resolved.
+- Done — Frontend wired to the real backend over HTTP (axios). See
+  [app/frontend/README.md](app/frontend/README.md) for the client layer.
 - Done — Production frontend image supports runtime env injection (`window.__ENV__`,
   substituted into `env-config.js` by the container's entrypoint at startup) so the
-  same built image can point at different backend URLs without a rebuild — see
-  Known limitations for the one file that doesn't use this path yet.
+  same built image can point at different backend URLs without a rebuild. Every
+  frontend call site reads env through `lib/config.ts`, so this actually takes
+  effect end-to-end, not just at the config-layer level.
 - Done — Stress tests at high concurrency (`npm run test:stress` in `app/backend`):
   10 iterations of stock=50/1000-concurrent-user oversell, one duplicate-user run,
   and one boundary run, all against the real running server. See Stress test results
@@ -38,13 +38,34 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 
 ## Quick start
 
+Installs root, backend, and frontend deps:
 ```bash
-npm run install:all   # installs root, backend, and frontend deps
+npm run install:all
+```
+
+Prepares the backend env file:
+```bash
 cp app/backend/.env.example app/backend/.env
+```
+
+Prepares the frontend env file:
+```bash
 cp app/frontend/.env.example app/frontend/.env
+```
+
+Starts Postgres and Redis in Docker:
+```bash
 docker compose -f app/backend/build/docker/docker-compose.yml up -d db redis
-npm --prefix app/backend run db:migrate   # also seeds the one `sales` row (id: "default")
-npm run dev            # runs backend + frontend concurrently
+```
+
+Applies migrations (also seeds the one `sales` row, id `"default"`):
+```bash
+npm --prefix app/backend run db:migrate
+```
+
+Runs backend and frontend concurrently:
+```bash
+npm run dev
 ```
 
 Backend starts at `http://localhost:3000` (Swagger docs at `/docs`), frontend at
@@ -61,10 +82,19 @@ To run either side alone, see [app/backend/README.md](app/backend/README.md) or
 
 ## Build
 
+Builds backend then frontend:
 ```bash
-npm run build            # builds backend then frontend
-npm run build:backend    # nest build && tsc-alias (path aliases rewritten for node dist/main.js)
-npm run build:frontend   # tsc -b && vite build
+npm run build
+```
+
+Builds just the backend (`nest build && tsc-alias` — path aliases rewritten for `node dist/main.js`):
+```bash
+npm run build:backend
+```
+
+Builds just the frontend (`tsc -b && vite build`):
+```bash
+npm run build:frontend
 ```
 
 Backend output: `app/backend/dist/main.js`, runnable directly with `node dist/main.js`
@@ -86,12 +116,24 @@ side's Docker setup on its own.
 **Dev** — backend (hot-reload, source mounted from the host) + frontend (Vite dev
 server, HMR) + Postgres + Redis + pgAdmin, all in containers:
 
+Prepares the backend env file:
 ```bash
 cp app/backend/.env.example app/backend/.env
+```
+
+Prepares the frontend env file:
+```bash
 cp app/frontend/.env.example app/frontend/.env
-npm run docker:up              # backend stack (db, redis, pgadmin, backend w/ --watch) + frontend (Vite)
-npm --prefix app/backend run db:migrate   # from the host — drizzle-kit isn't in the
-                                            # frontend/backend containers' runtime image
+```
+
+Starts the backend stack (db, redis, pgadmin, backend w/ `--watch`) and the frontend (Vite):
+```bash
+npm run docker:up
+```
+
+Applies migrations, from the host — `drizzle-kit` isn't in the containers' runtime image:
+```bash
+npm --prefix app/backend run db:migrate
 ```
 
 Backend at `http://localhost:3000`, frontend at `http://localhost:5173`, pgAdmin at
@@ -101,9 +143,14 @@ Backend at `http://localhost:3000`, frontend at `http://localhost:5173`, pgAdmin
 **Prod** — built images only (backend: compiled `dist/`, prod deps; frontend:
 static `dist/` served by nginx with runtime env injection — see Known limitations):
 
+Starts both stacks from their production images:
 ```bash
 npm run docker:up:prod
-npm --prefix app/backend run db:migrate   # still from the host — see caveat below
+```
+
+Applies migrations, from the host (see caveat below):
+```bash
+npm --prefix app/backend run db:migrate
 ```
 
 Backend at `http://localhost:3000`, frontend at `http://localhost:5173` (nginx,
@@ -650,17 +697,6 @@ numeric getter in `Number(...)` in `src/config/config.service.ts`.
   exists but there's no `.eslintrc`) — CI's backend job runs `tsc --noEmit` instead,
   which catches type errors but not style/lint issues. The frontend's `oxlint` is
   configured and does run in CI.
-- **The frontend's API base URL isn't fully runtime-configurable yet.** The
-  production Docker image injects `VITE_FLASH_SALE_*` at container startup via
-  `window.__ENV__` (see `app/frontend/src/lib/config.ts`), so the same built image
-  can be repointed at a different backend without a rebuild. But
-  `app/frontend/src/api/flash-sale/flash-sale-client.ts` — the file that actually
-  constructs the axios instance used for every API call — reads
-  `import.meta.env.VITE_FLASH_SALE_API_BASE_URL` directly instead of going through
-  `lib/config.ts`, so in practice the API base URL is still baked in at build time
-  for that one call site. Works today because the build-time and runtime values
-  happen to match in this setup; would need `flash-sale-client.ts` switched over to
-  `lib/config.ts` before one image could safely serve multiple environments.
 - **The Redis decrement and the Postgres insert are not atomic with each other.**
   If the process dies between the two, one unit of stock is lost — the system
   undersells, it does not oversell. This is a deliberate trade-off, not an oversight:

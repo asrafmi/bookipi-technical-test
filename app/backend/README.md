@@ -113,11 +113,28 @@ system needs — no CQRS, no extra modules for the sake of structure.
 From the repo root, `npm run dev` starts backend and frontend together (see the
 [root README](../../README.md)). To run just this app against local infrastructure:
 
+Installs deps:
 ```bash
 npm install
+```
+
+Prepares the env file:
+```bash
 cp .env.example .env
+```
+
+Starts Postgres and Redis in Docker:
+```bash
 docker compose -f build/docker/docker-compose.yml up -d db redis
+```
+
+Applies migrations:
+```bash
 npm run db:migrate
+```
+
+Runs the dev server:
+```bash
 npm run dev
 ```
 
@@ -157,11 +174,19 @@ Copy `.env.example` to `.env` before running.
 
 ## Database
 
+Generates a migration from `src/db/schema.ts` after a schema change:
 ```bash
-npm run db:generate   # generate a migration from src/db/schema.ts after a schema change
-npm run db:migrate    # apply pending migrations to the configured database (also seeds
-                       # the one `sales` row, id "default" — see migration 0001)
-npm run db:studio     # browse the database with Drizzle Studio
+npm run db:generate
+```
+
+Applies pending migrations to the configured database (also seeds the one `sales` row, id `"default"` — see migration 0001):
+```bash
+npm run db:migrate
+```
+
+Browses the database with Drizzle Studio:
+```bash
+npm run db:studio
 ```
 
 Drizzle schema is the source of truth for the database shape — never hand-edit the
@@ -184,16 +209,29 @@ backend is running.
 
 ## Testing
 
+Runs unit tests — fast, no infrastructure, all deps mocked:
 ```bash
-npm test              # unit — fast, no infrastructure, all deps mocked
-npm run test:coverage # unit, with coverage report
-npm run test:integration  # requires `docker compose ... up -d db redis` + a migrated DB
-npm run test:stress    # requires the above, plus the server itself running (npm run dev)
+npm test
+```
 
-or
+Runs unit tests with a coverage report:
+```bash
+npm run test:coverage
+```
 
+Runs integration tests (requires `docker compose ... up -d db redis` + a migrated DB):
+```bash
+npm run test:integration
+```
+
+Runs the stress test with its defaults (requires the above, plus the server itself running via `npm run dev`):
+```bash
+npm run test:stress
+```
+
+Runs the stress test with explicit concurrency knobs instead of the defaults:
+```bash
 STRESS_TEST_STOCK=50 STRESS_TEST_CONCURRENCY=1000 STRESS_TEST_ITERATIONS=10 STRESS_TEST_DUPLICATE_CONCURRENCY=100 npm run test:stress
-
 ```
 
 Unit tests (`flash-sale.test.ts`) mock `SaleRepository`/`PurchaseRepository`/
