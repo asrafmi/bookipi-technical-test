@@ -59,6 +59,66 @@ window for manual testing outside of it.
 To run either side alone, see [app/backend/README.md](app/backend/README.md) or
 [app/frontend/README.md](app/frontend/README.md).
 
+## Build
+
+```bash
+npm run build            # builds backend then frontend
+npm run build:backend    # nest build && tsc-alias (path aliases rewritten for node dist/main.js)
+npm run build:frontend   # tsc -b && vite build
+```
+
+Backend output: `app/backend/dist/main.js`, runnable directly with `node dist/main.js`
+once `app/backend/dist/node_modules` — actually just `app/backend`'s own
+`node_modules` (production deps only, see `npm install --omit=dev` in the Docker
+`runner` stage below) — is in place and `.env` is present. Frontend output:
+`app/frontend/dist/`, a static bundle servable by any static file server (the
+production Docker image serves it via nginx — see below).
+
+## Running with Docker
+
+Two independent app/backend and app/frontend Docker setups, each with its own
+`docker-compose.yml` (dev) and `docker-compose.production.yml` (prod) under
+`build/docker/`. The root `package.json` wraps both into single `docker:up*`
+commands; see [app/backend/README.md](app/backend/README.md#running) and
+[app/frontend/README.md](app/frontend/README.md#running) if you want to run one
+side's Docker setup on its own.
+
+**Dev** — backend (hot-reload, source mounted from the host) + frontend (Vite dev
+server, HMR) + Postgres + Redis + pgAdmin, all in containers:
+
+```bash
+cp app/backend/.env.example app/backend/.env
+cp app/frontend/.env.example app/frontend/.env
+npm run docker:up              # backend stack (db, redis, pgadmin, backend w/ --watch) + frontend (Vite)
+npm --prefix app/backend run db:migrate   # from the host — drizzle-kit isn't in the
+                                            # frontend/backend containers' runtime image
+```
+
+Backend at `http://localhost:3000`, frontend at `http://localhost:5173`, pgAdmin at
+`http://localhost:5050`. Stop with `npm run docker:down`; tail logs with
+`npm run docker:logs`.
+
+**Prod** — built images only (backend: compiled `dist/`, prod deps; frontend:
+static `dist/` served by nginx with runtime env injection — see Known limitations):
+
+```bash
+npm run docker:up:prod
+npm --prefix app/backend run db:migrate   # still from the host — see caveat below
+```
+
+Backend at `http://localhost:3000`, frontend at `http://localhost:5173` (nginx,
+mapped from container port 80 — see `FRONTEND_PORT` in
+`app/frontend/build/docker/docker-compose.production.yml`). Stop with
+`npm run docker:down:prod`; tail logs with `npm run docker:logs:prod`.
+
+**Migrations are not run automatically by either compose file, dev or prod** —
+there's no migration step in the Dockerfiles or a compose `command` override, and
+`drizzle-kit` is a devDependency, deliberately excluded from the backend's `runner`
+image (`npm install --omit=dev`) to keep the production image lean. Run
+`npm --prefix app/backend run db:migrate` from the host after `db` is up and
+healthy — this works against both dev and prod compose stacks because Postgres's
+port is published to the host in both (`DB_PORT`, default `5432`).
+
 ## Repo layout
 
 ```
