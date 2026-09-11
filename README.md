@@ -72,10 +72,12 @@ Backend starts at `http://localhost:3000` (Swagger docs at `/docs`), frontend at
 `http://localhost:5173` and talks to the real backend over HTTP — see
 [app/frontend/README.md](app/frontend/README.md) for the client layer.
 
-The seeded sale (`GET /v1/flash-sale/default/status`) ships with a fixed window — check
-the `INSERT INTO "sales"` statement in `app/backend/src/db/migrations/0001_eminent_tag.sql`
-for the exact `starts_at`/`ends_at`, and update that row directly if you need an active
-window for manual testing outside of it.
+The seeded sale (`GET /v1/flash-sale/default/status`) comes up **active**: migration
+`0002_fresh_sale_window.sql` anchors the `default` row's window relative to when you run
+`db:migrate` (`now() - 1 hour` → `now() + 23 hours`), so a fresh clone can purchase
+immediately rather than landing on an already-closed window. It only re-anchors a window
+that has already ended, so a window you set yourself for manual testing is left alone —
+re-run `npm --prefix app/backend run db:migrate` to roll it forward again once it lapses.
 
 To run either side alone, see [app/backend/README.md](app/backend/README.md) or
 [app/frontend/README.md](app/frontend/README.md).
@@ -106,10 +108,18 @@ production Docker image serves it via nginx — see below).
 
 ## Running with Docker
 
-Two independent app/backend and app/frontend Docker setups, each with its own
-`docker-compose.yml` (dev) and `docker-compose.production.yml` (prod) under
-`build/docker/`. The root `package.json` wraps both into single `docker:up*`
-commands; see [app/backend/README.md](app/backend/README.md#running) and
+Two independent app/backend and app/frontend Docker setups under `build/docker/`.
+The backend's `docker-compose.yml` defines the shared services (db, redis, pgadmin) and
+builds the backend's production `runner` stage; `docker-compose.override.yml` is what
+makes it a dev stack (the `base` stage, source bind-mounted, `nest start --watch`), and
+`docker-compose.production.yml` is the standalone prod stack. The frontend has a
+`docker-compose.yml` (Vite dev server) and a `docker-compose.production.yml` (nginx).
+
+Every `docker:up*` script passes `--build`, so images are rebuilt from the current
+source rather than silently reusing a stale one — the prod compose files pin fixed
+image tags (`bookipi-flash-sale-backend:latest`), which Docker would otherwise reuse
+as-is even after the code changed. The root `package.json` wraps both sides into single
+`docker:up*` commands; see [app/backend/README.md](app/backend/README.md#running) and
 [app/frontend/README.md](app/frontend/README.md#running) if you want to run one
 side's Docker setup on its own.
 
@@ -140,8 +150,19 @@ Backend at `http://localhost:3000`, frontend at `http://localhost:5173`, pgAdmin
 `http://localhost:5050`. Stop with `npm run docker:down`; tail logs with
 `npm run docker:logs`.
 
+`docker:down` tears the backend stack down with `-v`. That removes only the **anonymous
+volume masking the dev container's `node_modules`** — Postgres, Redis, and pgAdmin data
+live in host bind mounts under `build/docker/volumes/`, so nothing durable is lost. This
+matters: that anonymous volume outlives a plain `down`, and because it shadows the
+image's own `node_modules`, a container rebuilt with new dependencies would keep booting
+against the old ones and fail at compile time with `TS2307: Cannot find module 'ioredis'`
+(or `class-validator`, `supertest`) while still reporting its status as `Up`. Dropping it
+on the way down keeps the next `docker:up` honest.
+
 **Prod** — built images only (backend: compiled `dist/`, prod deps; frontend:
-static `dist/` served by nginx with runtime env injection — see Known limitations):
+static `dist/` served by nginx with runtime env injection — `VITE_FLASH_SALE_API_BASE_URL`
+and `VITE_FLASH_SALE_DEFAULT_SALE_ID` are substituted into `env-config.js` by the
+container's entrypoint at startup, so one built image can be repointed without a rebuild):
 
 Starts both stacks from their production images:
 ```bash
@@ -542,11 +563,11 @@ versus manual so far.
   Postgres and Redis state afterward, same as the integration suite but at much higher
   `N` and repeated automatically:
   - **Oversell invariant**, repeated 10x with a fresh sale row per iteration (config
-    via env, defaults `STRESS_TEST_STOCK=20`, `STRESS_TEST_CONCURRENCY=500`,
+    via env, defaults `STRESS_TEST_STOCK=50`, `STRESS_TEST_CONCURRENCY=1000`,
     `STRESS_TEST_ITERATIONS=10`): stock `S`, `N ≫ S` concurrent distinct identifiers,
     asserts exactly `S` accepted, `N-S` `SOLD_OUT`, Redis stock key exactly `0`, and
     exactly `S` rows in `purchases` — every iteration, not just the first.
-  - **Duplicate-user invariant** (`STRESS_TEST_DUPLICATE_CONCURRENCY`, default `50`):
+  - **Duplicate-user invariant** (`STRESS_TEST_DUPLICATE_CONCURRENCY`, default `100`):
     one identifier firing `N` concurrent requests, asserts exactly `1` accepted and
     `N-1` `ALREADY_PURCHASED`.
   - **Boundary invariant:** one request against a sale whose window hasn't opened yet
@@ -693,10 +714,6 @@ numeric getter in `Number(...)` in `src/config/config.service.ts`.
 
 ## Known limitations
 
-- **The backend has no ESLint config yet** (`app/backend`'s `npm run lint` script
-  exists but there's no `.eslintrc`) — CI's backend job runs `tsc --noEmit` instead,
-  which catches type errors but not style/lint issues. The frontend's `oxlint` is
-  configured and does run in CI.
 - **The Redis decrement and the Postgres insert are not atomic with each other.**
   If the process dies between the two, one unit of stock is lost — the system
   undersells, it does not oversell. This is a deliberate trade-off, not an oversight:

@@ -7,6 +7,17 @@ import { REDIS_CLIENT } from "src/redis/redis.module";
 
 const LUA_SCRIPT = readFileSync(path.join(__dirname, "purchase.lua"), "utf8");
 
+type RedisWithAttemptPurchase = RedisClient & {
+  attemptPurchase(
+    stockKey: string,
+    buyersKey: string,
+    identifier: string,
+    now: number,
+    startsAt: number,
+    endsAt: number,
+  ): Promise<string>;
+};
+
 @Injectable()
 export class PurchaseGateway implements OnModuleInit {
   constructor(@Inject(REDIS_CLIENT) private readonly redis: RedisClient) { }
@@ -36,7 +47,7 @@ export class PurchaseGateway implements OnModuleInit {
   }
 
   async attemptPurchase(saleId: string, identifier: string, now: Date, startsAt: Date, endsAt: Date): Promise<PurchaseGatewayResult> {
-    const outcome = await (this.redis as any).attemptPurchase(
+    const outcome = await (this.redis as RedisWithAttemptPurchase).attemptPurchase(
       this.stockKey(saleId),
       this.buyersKey(saleId),
       identifier,

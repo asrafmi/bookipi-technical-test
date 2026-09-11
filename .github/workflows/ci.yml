@@ -9,7 +9,7 @@ env:
 
 jobs:
   backend-typecheck:
-    name: Backend / typecheck
+    name: Backend / typecheck + lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +20,9 @@ jobs:
           cache-dependency-path: app/backend/package-lock.json
       - run: npm ci
         working-directory: app/backend
-      # No ESLint config exists yet in app/backend (see README known limitations) —
-      # tsc --noEmit is the real signal here until that's set up.
       - run: npx tsc --noEmit
+        working-directory: app/backend
+      - run: npm run lint
         working-directory: app/backend
 
   backend-unit-test:

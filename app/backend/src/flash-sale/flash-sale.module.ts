@@ -4,7 +4,6 @@ import { FlashSaleService } from "src/flash-sale/domain/flash-sale/flash-sale.se
 import { PurchaseRepository } from "src/flash-sale/infrastructure/repository/purchase/purchase.repository";
 import { SaleRepository } from "src/flash-sale/infrastructure/repository/sale/sale.repository";
 import { PurchaseGateway } from "src/flash-sale/infrastructure/redis/purchase-gateway";
-import { RedisModule } from "src/redis/redis.module";
 
 @Module({
   controllers: [FlashSaleController],

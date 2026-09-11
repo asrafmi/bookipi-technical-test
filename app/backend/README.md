@@ -105,8 +105,9 @@ system needs — no CQRS, no extra modules for the sake of structure.
 - Done — High-`N` stress test (`src/flash-sale/stress-test/run.ts`, run via
   `npm run test:stress`): 10 iterations of stock=50/1000-concurrent-user oversell, all
   passed, plus duplicate-user and boundary checks. See root README's Stress test results.
-- Pending — ESLint config (the `lint` script exists but there's no config file yet;
-  CI runs `tsc --noEmit` instead).
+- Done — ESLint config (`.eslintrc.json`, `@typescript-eslint` on
+  `eslint:recommended` + `plugin:@typescript-eslint/recommended`). CI's backend job
+  runs `tsc --noEmit` **and** `npm run lint`.
 
 ## Running
 
@@ -144,8 +145,14 @@ To run the backend itself inside Docker too (hot-reloading, source mounted from 
 host):
 
 ```bash
-docker compose -f build/docker/docker-compose.yml -f build/docker/docker-compose.override.yml up
+npm run docker:up
 ```
+
+(equivalently `docker compose -f build/docker/docker-compose.yml -f
+build/docker/docker-compose.override.yml up -d --build`.) Tear it down with
+`npm run docker:down`, which passes `-v` to drop the anonymous volume shadowing the
+container's `node_modules` — see the [root README's Docker section](../../README.md#running-with-docker)
+for why that matters. Postgres/Redis/pgAdmin data is in host bind mounts and survives.
 
 Or from the repo root: `npm run docker:up:backend` (dev) / `npm run docker:up:backend:prod`
 (production image, built by `build/docker/dockerfile`'s `runner` stage).
@@ -255,6 +262,8 @@ covers in detail and the actual numbers from the last run.
 npm run lint
 ```
 
-No `.eslintrc`/`eslint.config.*` exists yet — the script is wired but unconfigured.
-CI runs `tsc --noEmit` for the backend job instead of lint, which catches type errors
-but not style issues.
+Configured via `.eslintrc.json` — `@typescript-eslint/parser` with
+`eslint:recommended` and `plugin:@typescript-eslint/recommended`, ignoring `dist/`,
+`coverage/`, and plain `.js` files. `no-unused-vars` is an error (with an `^_`
+escape hatch for intentionally unused args); `no-explicit-any` is a warning. CI runs
+both `tsc --noEmit` and this lint for the backend job.
