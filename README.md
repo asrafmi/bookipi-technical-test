@@ -501,11 +501,28 @@ versus manual so far.
     up -d db redis`, migrations applied, and the API server itself running
     (`npm run dev` or `npm start`) since this hits it over real HTTP rather than an
     in-process Nest test module.
-- Frontend: no test runner installed yet.
+- **Frontend (automated):** component tests with Vitest + React Testing Library —
+  `npm run test:frontend` (or `npm --prefix app/frontend test`). `PurchaseCard.test.tsx`
+  mocks only the API layer (`api/flash-sale/flash-sale.ts`) — `useFlashSale` and
+  `domains/flash-sale.ts` run for real, same reasoning as the backend integration
+  suite not mocking Redis: the derived-state logic (Decision "UI states are derived")
+  is the actual thing worth testing, not a mock's behavior. Covers: loading state,
+  rendering product/stock info, the identifier validation gate on Buy Now, a
+  successful purchase, `ALREADY_PURCHASED`, sold-out, ended-sale, the check-status
+  action (`NOT_PURCHASED` and a confirmed prior purchase — the one path that was
+  previously wired but unused, see Known limitations history), the check-status
+  button's own disabled state, and that a stale check-status result is cleared once
+  a new purchase is submitted. `StatusBadge.test.tsx`, `FeedbackMessage.test.tsx`,
+  and `CountdownTimer.test.tsx` cover the smaller presentational components
+  (`CountdownTimer` with fake timers, since it drives off `Date.now()` + `setInterval`).
+  Test files sit next to their source (`Foo.test.tsx` beside `Foo.tsx`), same
+  convention as the backend; scoped out of `tsconfig.app.json` (a separate
+  `tsconfig.test.json` covers them) so `npm run build`'s typecheck never depends on
+  test-only types.
 - **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and
   pull request — backend typecheck, backend unit tests, backend integration tests
   (with real `postgres:16-alpine` and `redis:7-alpine` service containers, migrated
-  before the suite runs), and frontend lint + build, as four independent jobs.
+  before the suite runs), and frontend lint + test + build, as four independent jobs.
   The integration job sets `DB_POOL_MAX=50`, raised from the app's own default of
   `10` (postgres-js's default): the 30-concurrent oversell test intermittently hit
   `ECONNRESET` under GitHub Actions' shared runner, traced to requests queueing

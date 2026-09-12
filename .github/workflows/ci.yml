@@ -95,8 +95,8 @@ jobs:
       - run: npm run test:integration
         working-directory: app/backend
 
-  frontend-lint-build:
-    name: Frontend / lint + build
+  frontend-lint-test-build:
+    name: Frontend / lint + test + build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +108,8 @@ jobs:
       - run: npm ci
         working-directory: app/frontend
       - run: npm run lint
+        working-directory: app/frontend
+      - run: npm test
         working-directory: app/frontend
       - run: npm run build
         working-directory: app/frontend
