@@ -18,7 +18,9 @@ export async function attemptPurchase(saleId: string, identifier: string): Promi
 }
 
 export async function getUserStatus(saleId: string, identifier: string): Promise<UserStatus> {
-  const [err, status] = await awaitToError<ErrorResponse, UserStatus>(flashSale.get<UserStatus>(`/flash-sale/${saleId}/purchase/${identifier}`));
+  const [err, status] = await awaitToError<ErrorResponse, UserStatus>(
+    flashSale.get<UserStatus>(`/flash-sale/${saleId}/purchase/${encodeURIComponent(identifier)}`),
+  );
   if (err) throw err;
 
   return status;

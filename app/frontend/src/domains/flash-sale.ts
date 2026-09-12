@@ -1,5 +1,6 @@
 import type { BadgeTone } from "../components/StatusBadge";
-import type { PurchaseFailure, SaleStatus, SubmitState } from "../types/flash-sale";
+import type { FeedbackTone } from "../components/FeedbackMessage";
+import { PurchaseErrorCode, type PurchaseFailure, type SaleStatus, type SubmitState, type UserStatus } from "../types/flash-sale";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -36,6 +37,20 @@ export interface PurchaseCardViewState {
   buttonDisabled: boolean;
   showValidationFeedback: boolean;
   showAnyFeedback: boolean;
+  checkStatusDisabled: boolean;
+}
+
+export function deriveCheckResultFeedback(
+  checkResult: UserStatus | null,
+): { title: string; body: string; tone: FeedbackTone } | null {
+  if (!checkResult) return null;
+  if (checkResult.accepted) {
+    return { tone: "success", title: "You're in.", body: `Confirmed for ${checkResult.identifier}.` };
+  }
+  if (checkResult.code === PurchaseErrorCode.NOT_PURCHASED) {
+    return { tone: "neutral", title: "Not purchased yet", body: "This identifier hasn't secured an item." };
+  }
+  return { tone: "error", title: "Couldn't check status", body: checkResult.message };
 }
 
 export function deriveBadge(isUpcoming: boolean, isEnded: boolean): { label: string; tone: BadgeTone } {
@@ -104,6 +119,10 @@ export function derivePurchaseCardView(params: {
     isEnded ||
     Boolean(failure);
 
+  // Checking status only needs a syntactically valid identifier typed in — it's a
+  // read, not gated by the purchase window/lock the way "Buy Now" is.
+  const checkStatusDisabled = isSubmitting || !identifierTouched || !identifierIsValid;
+
   return {
     isSubmitting,
     hasSucceeded,
@@ -121,5 +140,6 @@ export function derivePurchaseCardView(params: {
     buttonDisabled,
     showValidationFeedback,
     showAnyFeedback,
+    checkStatusDisabled,
   };
 }

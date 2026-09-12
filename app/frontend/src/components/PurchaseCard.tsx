@@ -2,11 +2,21 @@ import { CountdownTimer } from "./CountdownTimer";
 import { FeedbackMessage } from "./FeedbackMessage";
 import { StatusBadge } from "./StatusBadge";
 import { useFlashSale } from "../hooks/use-flash-sale";
-import { formatSaleStartLabel } from "../domains/flash-sale";
+import { deriveCheckResultFeedback, formatSaleStartLabel } from "../domains/flash-sale";
 
 export function PurchaseCard() {
-  const { saleStatus, identifier, setIdentifier, failure, successIdentifier, submitPurchase, view } =
-    useFlashSale();
+  const {
+    saleStatus,
+    identifier,
+    setIdentifier,
+    failure,
+    successIdentifier,
+    submitPurchase,
+    checkState,
+    checkResult,
+    checkStatus,
+    view,
+  } = useFlashSale();
 
   if (!saleStatus || !view) {
     return (
@@ -15,6 +25,8 @@ export function PurchaseCard() {
       </div>
     );
   }
+
+  const checkResultFeedback = deriveCheckResultFeedback(checkResult);
 
   return (
     <div className="card">
@@ -78,6 +90,16 @@ export function PurchaseCard() {
           </div>
         )}
 
+        {checkResultFeedback && (
+          <div className="card__feedback-slot">
+            <FeedbackMessage
+              tone={checkResultFeedback.tone}
+              title={checkResultFeedback.title}
+              body={checkResultFeedback.body}
+            />
+          </div>
+        )}
+
         <button
           disabled={view.buttonDisabled}
           onClick={submitPurchase}
@@ -95,9 +117,9 @@ export function PurchaseCard() {
         </button>
 
         <div className="card__secondary">
-          <a href="#" onClick={(e) => e.preventDefault()}>
-            Already have one? Check your status
-          </a>
+          <button type="button" className="link-button" disabled={view.checkStatusDisabled} onClick={checkStatus}>
+            {checkState === "submitting" ? "Checking…" : "Already have one? Check your status"}
+          </button>
         </div>
       </div>
     </div>
