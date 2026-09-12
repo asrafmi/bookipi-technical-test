@@ -30,6 +30,8 @@ export const PurchaseErrorCode = {
   SALE_ENDED: "SALE_ENDED",
   ALREADY_PURCHASED: "ALREADY_PURCHASED",
   SOLD_OUT: "SOLD_OUT",
+  NOT_PURCHASED: "NOT_PURCHASED",
+  TEMPORARY_FAILURE: "TEMPORARY_FAILURE",
   INVALID_IDENTIFIER: "INVALID_IDENTIFIER",
   NETWORK_ERROR: "NETWORK_ERROR"
 } as const;
@@ -49,8 +51,7 @@ export interface PurchaseFailure {
 
 export type PurchaseResult = PurchaseSuccess | PurchaseFailure;
 
-export interface UserStatus {
-  hasPurchased: boolean;
-  identifier: string;
-  purchasedAt?: string;
-}
+// `GET .../purchase/:identifier` returns the same discriminated-union shape as
+// `POST .../purchase` (see backend AttemptPurchaseResponse) — checking status is
+// just a read of the same result a purchase attempt would have produced.
+export type UserStatus = PurchaseResult;

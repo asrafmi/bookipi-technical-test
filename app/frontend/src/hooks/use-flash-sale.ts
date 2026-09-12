@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { attemptPurchase, getFlashSaleStatus } from "../api/flash-sale/flash-sale";
-import { SubmitState, type PurchaseFailure, type PurchaseResult, type SaleStatus } from "../types/flash-sale";
+import { attemptPurchase, getFlashSaleStatus, getUserStatus } from "../api/flash-sale/flash-sale";
+import { SubmitState, type PurchaseFailure, type PurchaseResult, type SaleStatus, type UserStatus } from "../types/flash-sale";
 import { config } from "../lib/config";
 import awaitToError from "../lib/await-to-error";
 import type { ErrorResponse } from "../types/error";
@@ -14,6 +14,8 @@ interface FlashSaleState {
   submitState: SubmitState;
   failure: PurchaseFailure | null;
   successIdentifier: string | null;
+  checkState: SubmitState;
+  checkResult: UserStatus | null;
 }
 
 export function useFlashSale() {
@@ -24,6 +26,8 @@ export function useFlashSale() {
     submitState: SubmitState.IDLE,
     failure: null,
     successIdentifier: null,
+    checkState: SubmitState.IDLE,
+    checkResult: null,
   });
 
   const refreshStatus = useCallback(async () => {
@@ -38,11 +42,17 @@ export function useFlashSale() {
   }, [refreshStatus]);
 
   const setIdentifier = useCallback((identifier: string) => {
-    setState((prev) => ({ ...prev, identifier, failure: null }));
+    setState((prev) => ({ ...prev, identifier, failure: null, checkState: SubmitState.IDLE, checkResult: null }));
   }, []);
 
   const submitPurchase = useCallback(async () => {
-    setState((prev) => ({ ...prev, submitState: SubmitState.SUBMITTING, failure: null }));
+    setState((prev) => ({
+      ...prev,
+      submitState: SubmitState.SUBMITTING,
+      failure: null,
+      checkState: SubmitState.IDLE,
+      checkResult: null,
+    }));
 
     const trimmed = state.identifier.trim();
     const [err, result] = await awaitToError<ErrorResponse, PurchaseResult>(attemptPurchase(flashSale.defaultSaleId, trimmed));
@@ -65,6 +75,22 @@ export function useFlashSale() {
 
   }, [state.identifier, flashSale.defaultSaleId]);
 
+  const checkStatus = useCallback(async () => {
+    const trimmed = state.identifier.trim();
+    setState((prev) => ({ ...prev, checkState: SubmitState.SUBMITTING, checkResult: null }));
+
+    const [err, result] = await awaitToError<ErrorResponse, UserStatus>(getUserStatus(flashSale.defaultSaleId, trimmed));
+    if (err) {
+      setState((prev) => ({
+        ...prev,
+        checkState: SubmitState.FAILURE,
+        checkResult: { accepted: false, code: err.code, message: err.message },
+      }));
+      return;
+    }
+    setState((prev) => ({ ...prev, checkState: SubmitState.SUCCESS, checkResult: result }));
+  }, [state.identifier, flashSale.defaultSaleId]);
+
   const view = state.saleStatus
     ? derivePurchaseCardView({
         saleStatus: state.saleStatus,
@@ -83,6 +109,9 @@ export function useFlashSale() {
     failure: state.failure,
     successIdentifier: state.successIdentifier,
     submitPurchase,
+    checkState: state.checkState,
+    checkResult: state.checkResult,
+    checkStatus,
     view,
   };
 }
