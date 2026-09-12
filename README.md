@@ -537,15 +537,25 @@ versus manual so far.
   pull request — backend typecheck, backend unit tests, backend integration tests
   (with real `postgres:16-alpine` and `redis:7-alpine` service containers, migrated
   before the suite runs), and frontend lint + test + build, as four independent jobs.
-  The integration job sets `DB_POOL_MAX=50`, raised from the app's own default of
-  `10` (postgres-js's default): the 30-concurrent oversell test intermittently hit
-  `ECONNRESET` under GitHub Actions' shared runner, traced to requests queueing
-  behind a too-small connection pool for longer than the HTTP layer's keep-alive
-  window — not a concurrency bug in the purchase logic itself. Both the pool size
-  and the HTTP keep-alive/connection timeouts are `ConfigService`-driven
+  The integration job raises `DB_POOL_MAX` from the app's own default of `10`
+  (postgres-js's default) — first to `50`, then to `80` — and sets
+  `HTTP_KEEP_ALIVE_TIMEOUT_MS`/`HTTP_CONNECTION_TIMEOUT_MS` to `60000`: the
+  30-concurrent oversell test intermittently hit `ECONNRESET` under GitHub Actions'
+  shared runner, traced to requests queueing behind a too-small connection pool for
+  longer than the HTTP layer's keep-alive window — not a concurrency bug in the
+  purchase logic itself (the local Docker compose stack tunes Postgres's own
+  `max_connections=200` to go with a high pool size — see the stress-test section
+  below — but GitHub Actions' `services:` block only accepts docker *flags* in
+  `options`, not container command args, so the CI Postgres container can't be
+  retuned past its `max_connections=100` default; `80` leaves headroom for the
+  health check and migration step). All three values are `ConfigService`-driven
   (`DB_POOL_MAX`, `HTTP_KEEP_ALIVE_TIMEOUT_MS`, `HTTP_CONNECTION_TIMEOUT_MS` — see
   [app/backend/README.md](app/backend/README.md#configuration)), not hardcoded, so
-  this is a config change per environment rather than a code change.
+  this is a config change per environment rather than a code change. If this still
+  recurs, the next lever is lowering the oversell test's own concurrency (`30`) —
+  Redis's atomicity guarantee (Decision 1) doesn't depend on that specific number,
+  so a smaller value proves the same invariant with less pressure on CI's fixed
+  connection ceiling.
 
 ## Stress test results
 
