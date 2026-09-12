@@ -389,6 +389,20 @@ always `"default"` — the one seeded row (see Decision 6 above).
 | `GET /v1/flash-sale/:saleId/status` | Sale status (upcoming/active/ended), stock remaining |
 | `POST /v1/flash-sale/:saleId/purchase` | Attempt a purchase — body: `{ "identifier": string }` |
 | `GET /v1/flash-sale/:saleId/purchase/:identifier` | Check whether this identifier has secured an item |
+| `GET /` | Liveness — 200 once the process is up, no dependency check |
+| `GET /health` | Readiness — checks Postgres and Redis, 503 if either is unreachable |
+
+`GET /` exists mainly so an unmapped root route doesn't fall through to Nest's default
+404 — a load balancer probe or a reviewer's first `curl` gets a 200 with a pointer to
+`/docs` and `/health` instead. The actual dependency check is `GET /health`
+(`@nestjs/terminus`, see `src/health/`): it pings the same Postgres (Drizzle) and
+Redis (ioredis) clients every repository and the purchase gateway use, each raced
+against a 2s timeout. The timeout matters — ioredis queues commands while
+reconnecting instead of rejecting them, so a bare `PING` during a Redis outage would
+hang for as long as Redis stayed down, which is the opposite of what a readiness
+probe needs. A `503` (Terminus's default when any indicator is down) is the signal
+an orchestrator should use to stop routing traffic to this instance, distinct from
+"the process crashed."
 
 **`GET .../status`** response:
 
