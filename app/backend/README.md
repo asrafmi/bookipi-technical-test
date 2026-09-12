@@ -112,7 +112,7 @@ system needs — no CQRS, no extra modules for the sake of structure.
 - Done — Unit tests (`flash-sale.test.ts`) covering `FlashSaleService` with all three
   dependencies mocked.
 - Done — Integration tests (`flash-sale.integration.test.ts`) against real Postgres +
-  Redis, including the oversell (30 concurrent, stock 5) and duplicate-user (10
+  Redis, including the oversell (15 concurrent, stock 5) and duplicate-user (10
   concurrent, same identifier) invariants.
 - Done — High-`N` stress test (`src/flash-sale/stress-test/run.ts`, run via
   `npm run test:stress`): 10 iterations of stock=50/10,000-concurrent-user oversell, all
