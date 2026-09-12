@@ -32,7 +32,7 @@ src/
                         from ConfigService via a standalone app context), mounts
                         Swagger, enables CORS, listens on ConfigService's port.
   app.module.ts         Root module — imports ConfigModule, DatabaseModule,
-                         FlashSaleModule, RedisModule.
+                         FlashSaleModule, HealthModule, RedisModule.
   common/error/
     await-to-error.ts   [err, result] tuple wrapper, used at the repository/persistence
                          boundary instead of try/catch.
@@ -54,6 +54,16 @@ src/
   redis/
     redis.client.ts       createRedisClient() — thin ioredis wrapper.
     redis.module.ts       Global module, provides REDIS_CLIENT built from ConfigService.
+  health/
+    health.controller.ts          GET / (liveness) and GET /health (readiness, via
+                                   @nestjs/terminus).
+    database.health-indicator.ts  Pings DRIZZLE_CLIENT (SELECT 1), raced against a
+                                   2s timeout.
+    redis.health-indicator.ts     Pings REDIS_CLIENT, same 2s-timeout treatment —
+                                   ioredis queues commands while reconnecting instead
+                                   of rejecting, so an un-timed PING during an outage
+                                   would hang instead of failing fast.
+    health.module.ts
   flash-sale/
     domain/flash-sale/
       flash-sale.service.ts    The atomic purchase decision + window logic — orchestrates
@@ -108,6 +118,10 @@ system needs — no CQRS, no extra modules for the sake of structure.
 - Done — ESLint config (`.eslintrc.json`, `@typescript-eslint` on
   `eslint:recommended` + `plugin:@typescript-eslint/recommended`). CI's backend job
   runs `tsc --noEmit` **and** `npm run lint`.
+- Done — `GET /health` (readiness, `@nestjs/terminus`) checks Postgres and Redis
+  connectivity and returns 503 if either is down; `GET /` (liveness) so the root
+  route returns 200 instead of falling through to a 404. See root README's API
+  reference.
 
 ## Running
 
