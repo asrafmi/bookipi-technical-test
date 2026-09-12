@@ -82,7 +82,9 @@ src/
       redis/
         purchase.lua              The atomic Lua script: window + dedup + stock, one round trip.
         purchase-gateway.ts        PurchaseGateway — bootstraps Redis stock from Postgres on
-                                    first use, then EVALSHAs the script.
+                                    first use (a single `SET ... NX`, not check-then-set — see
+                                    root README's Decision 1), then EVALSHAs the script.
+        purchase-gateway.test.ts   Unit tests — bootstrap's NX seeding and compensate, redis mocked.
       repository/
         purchase/purchase.entity.ts     Drizzle schema for `purchases` — UNIQUE(sale_id, identifier).
         purchase/purchase.repository.ts PurchaseRepository — findByIdentifier, count, insertIfNotExists.
