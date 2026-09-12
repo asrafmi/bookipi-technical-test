@@ -11,6 +11,7 @@ services:
       - NODE_ENV=development
       - DB_HOST=db
       - REDIS_HOST=redis
+      - DB_POOL_MAX=${DB_POOL_MAX:-100}
     env_file:
       - ../../.env
     ports:

@@ -40,6 +40,13 @@ function heading(title: string): void {
   console.log(`\n${color.bold(color.cyan(`=== ${title} ===`))}`);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Add a small delay between iterations to avoid saturating the DB/Redis with back-to-back runs, which can cause false negatives in the stress test.
+const INTER_ITERATION_DELAY_MS = Number(process.env.STRESS_TEST_ITERATION_DELAY_MS ?? 2000);
+
 interface PurchaseResponseBody {
   accepted: boolean;
   code?: string;
@@ -197,7 +204,7 @@ function printTable(rows: OversellIterationResult[]): void {
 
 async function main(): Promise<void> {
   const stock = Number(process.env.STRESS_TEST_STOCK ?? 50);
-  const concurrentUsers = Number(process.env.STRESS_TEST_CONCURRENCY ?? 1000);
+  const concurrentUsers = Number(process.env.STRESS_TEST_CONCURRENCY ?? 10000);
   const iterations = Number(process.env.STRESS_TEST_ITERATIONS ?? 10);
 
   const db = createDrizzleClient({
@@ -225,6 +232,7 @@ async function main(): Promise<void> {
     const result = await runOversellIteration(db, redis, i, stock, concurrentUsers);
     oversellResults.push(result);
     process.stdout.write(result.passed ? color.green(".") : color.red("X"));
+    if (i < iterations) await sleep(INTER_ITERATION_DELAY_MS);
   }
   console.log();
   printTable(oversellResults);
@@ -240,6 +248,8 @@ async function main(): Promise<void> {
   const oversellCountNote = color.dim(`(${oversellPassCount}/${iterations} iterations)`);
   console.log(`\nOversell test: ${verdict(oversellAllPassed, oversellLabel)} ${oversellCountNote}`);
   console.log(color.dim(`Avg iteration duration: ${avgDurationMs.toFixed(1)}ms | Approx throughput: ${throughputRps.toFixed(1)} req/s`));
+
+  await sleep(INTER_ITERATION_DELAY_MS);
 
   heading("Duplicate-user test");
   const dupConcurrency = Number(process.env.STRESS_TEST_DUPLICATE_CONCURRENCY ?? 100);

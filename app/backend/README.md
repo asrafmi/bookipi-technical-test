@@ -103,7 +103,7 @@ system needs — no CQRS, no extra modules for the sake of structure.
   Redis, including the oversell (30 concurrent, stock 5) and duplicate-user (10
   concurrent, same identifier) invariants.
 - Done — High-`N` stress test (`src/flash-sale/stress-test/run.ts`, run via
-  `npm run test:stress`): 10 iterations of stock=50/1000-concurrent-user oversell, all
+  `npm run test:stress`): 10 iterations of stock=50/10,000-concurrent-user oversell, all
   passed, plus duplicate-user and boundary checks. See root README's Stress test results.
 - Done — ESLint config (`.eslintrc.json`, `@typescript-eslint` on
   `eslint:recommended` + `plugin:@typescript-eslint/recommended`). CI's backend job

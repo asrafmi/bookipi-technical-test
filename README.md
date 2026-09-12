@@ -32,7 +32,7 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   frontend call site reads env through `lib/config.ts`, so this actually takes
   effect end-to-end, not just at the config-layer level.
 - Done — Stress tests at high concurrency (`npm run test:stress` in `app/backend`):
-  10 iterations of stock=50/1000-concurrent-user oversell, one duplicate-user run,
+  10 iterations of stock=50/10,000-concurrent-user oversell, one duplicate-user run,
   and one boundary run, all against the real running server. See Stress test results
   below.
 
@@ -222,87 +222,11 @@ Decision 2 below.
 
 ### Components
 
-```mermaid
-graph TB
-    subgraph Client
-        FE["React frontend<br/>status · identifier · Buy Now"]
-    end
-
-    subgraph "API server (NestJS + Fastify)"
-        H1["GET /v1/flash-sale/:saleId/status"]
-        H2["POST /v1/flash-sale/:saleId/purchase"]
-        H3["GET /v1/flash-sale/:saleId/purchase/:identifier"]
-        SVC["FlashSaleService<br/>orchestration + error taxonomy"]
-    end
-
-    subgraph "Redis (atomic decision)"
-        LUA["purchase.lua<br/>window + dedup + stock,<br/>one atomic script"]
-        K1[("sale:&lt;saleId&gt;:stock<br/>counter")]
-        K2[("sale:&lt;saleId&gt;:buyers<br/>set")]
-    end
-
-    subgraph "Postgres (source of truth)"
-        T0[("sales<br/>static config: name, stock, window")]
-        T1[("purchases<br/>UNIQUE(sale_id, identifier)")]
-    end
-
-    FE --> H1 & H2 & H3
-    H1 --> SVC
-    H2 --> SVC
-    H3 --> SVC
-    SVC -->|"read config"| T0
-    SVC -->|"bootstrap once,<br/>then EVALSHA"| LUA
-    LUA --> K1
-    LUA --> K2
-    SVC -->|"INSERT on accept<br/>(synchronous)"| T1
-    T1 -.->|"bootstrap: totalStock - COUNT(*)<br/>seeds Redis counter on first use"| K1
-
-    classDef critical fill:#fde68a,stroke:#b45309,stroke-width:2px
-    class LUA critical
-```
+![Component diagram: React frontend calling the three API endpoints, FlashSaleService orchestrating Postgres (sales, purchases) and Redis (purchase.lua, stock counter, buyers set)](assets/components.png)
 
 ### Request path for one purchase
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant API as API server
-    participant R as Redis
-    participant PG as Postgres
-
-    U->>API: POST /v1/flash-sale/:saleId/purchase {identifier}
-
-    API->>PG: SELECT sales WHERE id = :saleId
-    PG-->>API: totalStock, startsAt, endsAt
-    API->>PG: COUNT(*) purchases WHERE sale_id = :saleId
-    API->>R: bootstrap: SET sale:stock (only if key absent)
-
-    rect rgb(253, 230, 138)
-    Note over API,R: CRITICAL SECTION — one round trip,<br/>one atomic unit, nothing can interleave
-    API->>R: EVALSHA purchase.lua
-    Note right of R: 1. is now within [startsAt, endsAt]?<br/>2. SISMEMBER sale:buyers identifier<br/>3. GET sale:stock > 0?<br/>4. DECR sale:stock<br/>5. SADD sale:buyers identifier
-    R-->>API: OK | SALE_NOT_STARTED | SALE_ENDED<br/>| ALREADY_PURCHASED | SOLD_OUT
-    end
-
-    alt Rejected by Redis
-        API-->>U: 403/409/410 { accepted: false, code: <reason> }
-        Note over PG: purchases is never touched
-    else Accepted by Redis
-        API->>PG: INSERT INTO purchases
-        alt Insert succeeds
-            PG-->>API: ok
-            API-->>U: 200 { accepted: true, identifier, purchasedAt }
-        else Unique violation
-            Note over API: a race slipped through —<br/>should not happen, the safety net caught it
-            API-->>U: 409 { accepted: false, code: ALREADY_PURCHASED }
-        else Other error
-            API->>R: INCR sale:stock, SREM sale:buyers
-            Note over API,R: compensate — give the slot back
-            API-->>U: 503 { accepted: false, code: TEMPORARY_FAILURE }
-        end
-    end
-```
+![Sequence diagram: user posts a purchase, API reads sale config from Postgres, EVALSHAs purchase.lua on Redis inside the critical section, then inserts into Postgres on acceptance or compensates Redis on a write failure](assets/sequence.png)
 
 ## Key design decisions
 
@@ -563,7 +487,7 @@ versus manual so far.
   Postgres and Redis state afterward, same as the integration suite but at much higher
   `N` and repeated automatically:
   - **Oversell invariant**, repeated 10x with a fresh sale row per iteration (config
-    via env, defaults `STRESS_TEST_STOCK=50`, `STRESS_TEST_CONCURRENCY=1000`,
+    via env, defaults `STRESS_TEST_STOCK=50`, `STRESS_TEST_CONCURRENCY=10000`,
     `STRESS_TEST_ITERATIONS=10`): stock `S`, `N ≫ S` concurrent distinct identifiers,
     asserts exactly `S` accepted, `N-S` `SOLD_OUT`, Redis stock key exactly `0`, and
     exactly `S` rows in `purchases` — every iteration, not just the first.
@@ -712,6 +636,48 @@ crashed the server with `TypeError [ERR_INVALID_ARG_TYPE]` — `ConfigService`'s
 so an env var string reached Node's `setTimeout` as a string. Fixed by wrapping each
 numeric getter in `Number(...)` in `src/config/config.service.ts`.
 
+### Another 10x: default raised to `N = 10,000`, pushed further to `N = 15,000`
+
+Following the same "keep pushing `N` up and see if the invariant still holds" logic,
+`STRESS_TEST_CONCURRENCY`'s default in `src/flash-sale/stress-test/run.ts` is now
+`10,000` (was `1,000`), so `npm run test:stress` with no env vars at all runs the
+scale the previous section had to opt into. Pushed further still to `N = 15,000` via
+the env var, to see how much further past the new default the invariant holds.
+
+Reaching this required raising a few OS-level ceilings beyond what `.env` or app code
+control, all one layer below the `DB_POOL_MAX`/file-descriptor tuning the previous
+section already covers — the container's own network namespace (independent of any
+sysctl raised on the host) has its own TCP accept-queue limit, and Postgres's
+`max_connections` needs headroom above `DB_POOL_MAX` for `psql`/`drizzle-kit
+migrate`/pgAdmin to still get a slot while the pool is saturated. Both are now set in
+`build/docker/docker-compose.yml` and `docker-compose.production.yml` (`sysctls:
+net.core.somaxconn` / `net.ipv4.tcp_max_syn_backlog` on the `backend`, `db`, and
+`redis` services; `command: ["postgres", "-c", "max_connections=200"]` on `db`), so a
+fresh `docker compose up` gets this without any manual step.
+
+`STRESS_TEST_CONCURRENCY=15000 STRESS_TEST_ITERATIONS=10`, stock `S = 50`, against the
+dev Docker stack (`npm run docker:up`):
+
+| Iter | Accepted | Sold out | Redis stock | DB rows | Duration (ms) | Result |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 14,950 | 0 | 50 | 9,716 | PASS |
+| 2 | 50 | 14,950 | 0 | 50 | 6,214 | PASS |
+| 3 | 50 | 14,950 | 0 | 50 | 11,438 | PASS |
+| 4 | 50 | 14,950 | 0 | 50 | 11,490 | PASS |
+| 5 | 50 | 14,950 | 0 | 50 | 13,672 | PASS |
+| 6 | 50 | 14,950 | 0 | 50 | 10,617 | PASS |
+| 7 | 50 | 14,950 | 0 | 50 | 7,277 | PASS |
+| 8 | 50 | 14,950 | 0 | 50 | 13,822 | PASS |
+| 9 | 50 | 14,950 | 0 | 50 | 8,189 | PASS |
+| 10 | 50 | 14,950 | 0 | 50 | 7,716 | PASS |
+
+**10/10 passed at `N = 15,000` against the containerized stack.** Same invariant as
+every run above: exactly 50 accepted, exactly 14,950 `SOLD_OUT`, Redis stock at exactly
+`0`, exactly 50 rows in `purchases`, every iteration. Average iteration duration
+10,015ms, ≈1,498 req/s aggregate. Duplicate-user test at the same `N = 15,000`: exactly
+1 accepted, 14,999 `ALREADY_PURCHASED`. Boundary test unchanged: `SALE_NOT_STARTED`/403
+and `SALE_ENDED`/410 both correct.
+
 ## Known limitations
 
 - **The Redis decrement and the Postgres insert are not atomic with each other.**
@@ -725,13 +691,18 @@ numeric getter in `Number(...)` in `src/config/config.service.ts`.
   the brief's simplification.
 - **The stress test runs against one backend process and one Redis instance, on a
   single laptop.** The results in Stress test results above are real and the
-  invariants held on every run — at both `N = 1,000` and `N = 10,000` — but the
-  throughput numbers specifically reflect this one machine's Docker networking
-  overhead and a single Node event loop, not a ceiling on the architecture. At
-  `N = 10,000` the default `DB_POOL_MAX=10` wasn't enough to avoid connections being
-  dropped outright (see the "10x concurrency" subsection above) — a real,
-  config-level resource limit, not a logic bug, but worth knowing before assuming the
-  defaults scale unmodified past a few thousand concurrent requests.
+  invariants held on every run — at `N = 1,000`, `N = 10,000` (against a native
+  production build), and `N = 10,000`/`N = 15,000` again (against the containerized
+  dev stack) — but the throughput numbers specifically reflect this one machine's
+  Docker networking overhead and a single Node event loop, not a ceiling on the
+  architecture. Reaching these needed raising several OS-level ceilings
+  (`DB_POOL_MAX`, the container's own `somaxconn`/`tcp_max_syn_backlog`, and
+  Postgres's `max_connections`) beyond what's needed for ordinary use — see the "10x
+  concurrency" and "Another 10x" subsections above for what each one was and why it
+  mattered. All are now set directly in the Docker Compose files rather than left as
+  a manual step, but they're still real, config-level resource limits worth knowing
+  about before assuming the plain defaults scale unmodified past a few thousand
+  concurrent requests.
 - **Path aliasing (`src/...` absolute imports) needed extra wiring beyond `tsconfig.json`
   alone.** TypeScript's `paths` only affects compile-time resolution, not runtime — so
   `ts-jest` needed a matching `moduleNameMapper`, and `nest build`'s output needed
