@@ -91,7 +91,29 @@ would produce, so the UI doesn't need to know which path a failure came through.
 
 ## Testing
 
-Not yet wired up — no test runner is installed. See the root README's Known limitations.
+Component tests with **Vitest + React Testing Library**:
+
+```bash
+npm test              # single run
+npm run test:watch    # watch mode
+npm run test:coverage # with coverage
+```
+
+Config lives in `vitest.config.ts` (kept separate from `vite.config.ts`, same reasoning
+as the backend's separate Jest configs for unit vs. integration — build config
+shouldn't carry test-only settings). Test files sit next to their source
+(`Foo.test.tsx` beside `Foo.tsx`) and are scoped out of `tsconfig.app.json` into a
+dedicated `tsconfig.test.json`, so `npm run build`'s typecheck never depends on
+`vitest`/`@testing-library` types.
+
+`PurchaseCard.test.tsx` mocks only `api/flash-sale/flash-sale.ts` — `useFlashSale`
+and `derivePurchaseCardView` run unmocked, so the tests exercise the real
+derived-state logic the component renders from, not a stubbed hook. Covers the
+loading state, product/stock rendering, the identifier-validation gate on Buy Now,
+a successful purchase, `ALREADY_PURCHASED`, sold-out, ended-sale, and the
+check-status action (both `NOT_PURCHASED` and a confirmed prior purchase).
+`StatusBadge.test.tsx`, `FeedbackMessage.test.tsx`, and `CountdownTimer.test.tsx`
+cover the smaller presentational components.
 
 ## Linting
 
