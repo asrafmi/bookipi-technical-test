@@ -7,6 +7,8 @@ export const sales = pgTable("sales", {
   totalStock: integer("total_stock").notNull(),
   startsAt: timestamp("starts_at").notNull(),
   endsAt: timestamp("ends_at").notNull(),
+  soldCount: integer("sold_count").notNull().default(0),
+  soldCountUpdatedAt: timestamp("sold_count_updated_at").notNull().defaultNow(),
 })
 
 export type SaleRow = typeof sales.$inferSelect;

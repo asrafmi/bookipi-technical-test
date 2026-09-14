@@ -30,5 +30,11 @@ export default class ConfigService {
       port: Number(this.config.get<number>("REDIS_PORT", 6379)),
     };
   }
+
+  reconciliation() {
+    return {
+      intervalMs: Number(this.config.get<number>("RECONCILIATION_INTERVAL_MS", 5 * 60_000)),
+    };
+  }
   // add more config getters as needed
 }

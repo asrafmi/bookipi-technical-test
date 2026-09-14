@@ -45,7 +45,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     # See the base docker-compose.yml's `db` service for why — headroom above
     # DB_POOL_MAX so psql/migrations/monitoring always have a free slot.
-    command: ["postgres", "-c", "max_connections=200"]
+    command: ["postgres", "-c", "max_connections=500"]
     ports:
       - "${DB_PORT:-5432}:5432"
     volumes:
@@ -62,6 +62,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # AOF persistence, everysec — bounds an unclean crash's data loss to ~1s.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:

@@ -45,7 +45,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Add a small delay between iterations to avoid saturating the DB/Redis with back-to-back runs, which can cause false negatives in the stress test.
-const INTER_ITERATION_DELAY_MS = Number(process.env.STRESS_TEST_ITERATION_DELAY_MS ?? 2000);
+const INTER_ITERATION_DELAY_MS = Number(process.env.STRESS_TEST_ITERATION_DELAY_MS ?? 3000);
 
 interface PurchaseResponseBody {
   accepted: boolean;
@@ -90,6 +90,22 @@ async function cleanupSale(db: DrizzleClient, redis: RedisClient, saleId: string
   await redis.del(`sale:${saleId}:stock`, `sale:${saleId}:buyers`);
 }
 
+// Waits for the async worker to drain before asserting DB state.
+async function waitForPurchaseRowCount(
+  db: DrizzleClient,
+  saleId: string,
+  expectedCount: number,
+  timeoutMs = 10000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let count = (await db.query.purchases.findMany({ where: eq(purchases.saleId, saleId) })).length;
+  while (count < expectedCount && Date.now() < deadline) {
+    await sleep(50);
+    count = (await db.query.purchases.findMany({ where: eq(purchases.saleId, saleId) })).length;
+  }
+  return count;
+}
+
 interface OversellIterationResult {
   iteration: number;
   accepted: number;
@@ -119,7 +135,7 @@ async function runOversellIteration(
     const soldOut = results.filter((r) => r.body.code === PurchaseErrorCode.SOLD_OUT).length;
 
     const redisStockRemaining = Number((await redis.get(`sale:${sale.id}:stock`)) ?? "-1");
-    const dbRowCount = (await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) })).length;
+    const dbRowCount = await waitForPurchaseRowCount(db, sale.id, stock);
 
     const passed =
       accepted === stock &&
@@ -148,7 +164,7 @@ async function runDuplicateUserTest(db: DrizzleClient, redis: RedisClient, concu
 
     const accepted = results.filter((r) => r.body.accepted === true).length;
     const alreadyPurchased = results.filter((r) => r.body.code === PurchaseErrorCode.ALREADY_PURCHASED).length;
-    const dbRowCount = (await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) })).length;
+    const dbRowCount = await waitForPurchaseRowCount(db, sale.id, 1);
 
     const passed = accepted === 1 && alreadyPurchased === concurrentRequests - 1 && dbRowCount === 1;
 

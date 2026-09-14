@@ -54,6 +54,17 @@ describe("FlashSaleController (integration)", () => {
     await redis.del(`sale:${saleId}:stock`, `sale:${saleId}:buyers`);
   }
 
+  // A 200 no longer guarantees the row exists — the insert happens in an async worker.
+  async function waitForPurchaseRows(saleId: string, expectedCount: number, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    let rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, saleId) });
+    while (rows.length < expectedCount && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, saleId) });
+    }
+    return rows;
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -133,10 +144,13 @@ describe("FlashSaleController (integration)", () => {
         expect(res.body).toMatchObject({ accepted: true, identifier: "alice@example.com" });
         expect(res.body.purchasedAt).toBeDefined();
 
-        const row = await db.query.purchases.findFirst({
-          where: eq(purchases.saleId, sale.id),
-        });
-        expect(row?.identifier).toBe("alice@example.com");
+        const rows = await waitForPurchaseRows(sale.id, 1);
+        expect(rows[0]?.identifier).toBe("alice@example.com");
+
+        const updatedSale = await db.query.sales.findFirst({ where: eq(sales.id, sale.id) });
+        expect(updatedSale?.soldCount).toBe(1);
+        // soldCountUpdatedAt must move with soldCount, or reconciliation stays stuck.
+        expect(updatedSale?.soldCountUpdatedAt.getTime()).toBeGreaterThan(sale.soldCountUpdatedAt.getTime());
       } finally {
         await cleanupSale(sale.id);
       }
@@ -192,7 +206,7 @@ describe("FlashSaleController (integration)", () => {
         expect(second.status).toBe(409);
         expect(second.body.code).toBe(PurchaseErrorCode.ALREADY_PURCHASED);
 
-        const rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) });
+        const rows = await waitForPurchaseRows(sale.id, 1);
         expect(rows).toHaveLength(1);
       } finally {
         await cleanupSale(sale.id);
@@ -220,7 +234,7 @@ describe("FlashSaleController (integration)", () => {
         const remaining = await redis.get(stockKey);
         expect(Number(remaining)).toBe(0);
 
-        const rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) });
+        const rows = await waitForPurchaseRows(sale.id, 2);
         expect(rows).toHaveLength(2);
       } finally {
         await cleanupSale(sale.id);
@@ -253,8 +267,11 @@ describe("FlashSaleController (integration)", () => {
         const remaining = await redis.get(`sale:${sale.id}:stock`);
         expect(Number(remaining)).toBe(0);
 
-        const rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) });
+        const rows = await waitForPurchaseRows(sale.id, stock);
         expect(rows).toHaveLength(stock);
+
+        const updatedSale = await db.query.sales.findFirst({ where: eq(sales.id, sale.id) });
+        expect(updatedSale?.soldCount).toBe(stock);
       } finally {
         await cleanupSale(sale.id);
       }
@@ -276,8 +293,11 @@ describe("FlashSaleController (integration)", () => {
         expect(accepted).toHaveLength(1);
         expect(alreadyPurchased).toHaveLength(9);
 
-        const rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, sale.id) });
+        const rows = await waitForPurchaseRows(sale.id, 1);
         expect(rows).toHaveLength(1);
+
+        const updatedSale = await db.query.sales.findFirst({ where: eq(sales.id, sale.id) });
+        expect(updatedSale?.soldCount).toBe(1);
       } finally {
         await cleanupSale(sale.id);
       }
@@ -313,6 +333,8 @@ describe("FlashSaleController (integration)", () => {
         await request(app.getHttpServer())
           .post(`/v1/flash-sale/${sale.id}/purchase`)
           .send({ identifier: "erin@example.com" });
+
+        await waitForPurchaseRows(sale.id, 1);
 
         const res = await request(app.getHttpServer()).get(`/v1/flash-sale/${sale.id}/purchase/erin@example.com`);
         expect(res.status).toBe(200);

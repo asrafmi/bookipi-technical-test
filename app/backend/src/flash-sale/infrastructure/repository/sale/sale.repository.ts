@@ -13,4 +13,16 @@ export class SaleRepository {
       where: eq(sales.id, saleId),
     })
   }
+
+  findAllIds() {
+    return this.db.query.sales.findMany({ columns: { id: true } });
+  }
+
+  // Reconciliation write: Redis won, overwrite Postgres's cached counter to match.
+  async overwriteSoldCount(saleId: string, soldCount: number, updatedAt: Date) {
+    await this.db
+      .update(sales)
+      .set({ soldCount, soldCountUpdatedAt: updatedAt })
+      .where(eq(sales.id, saleId));
+  }
 }
