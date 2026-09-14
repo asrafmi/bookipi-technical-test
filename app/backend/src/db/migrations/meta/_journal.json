@@ -22,6 +22,13 @@
       "when": 1788971377478,
       "tag": "0002_fresh_sale_window",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789376523238,
+      "tag": "0003_add_sold_count_to_sales",
+      "breakpoints": true
     }
   ]
 }

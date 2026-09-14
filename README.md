@@ -11,19 +11,25 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 
 - Done — Backend: all three endpoints implemented and exercised end-to-end over HTTP —
   sale status, attempt purchase, and check own purchase result. See API reference below.
-- Done — Backend: the atomic purchase decision (Redis Lua script + synchronous Postgres
-  insert, Decision 1/2/3 below) is implemented and wired into the purchase endpoint —
-  no longer target design.
+- Done — Backend: the atomic purchase decision (Redis Lua script, Decision 1 below) is
+  implemented and wired into the purchase endpoint — no longer target design.
+- Done — Backend: the Postgres write is asynchronous via a BullMQ queue, not in the
+  request path — Decision 3 below (revised from an earlier synchronous design).
 - Done — Backend: sale configuration (product name, stock, window) lives in a `sales`
   table, seeded by migration with a fixed id (`default`) rather than env vars — see
-  Decision 6 below.
-- Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`) — sale
-  window boundaries plus `attemptPurchase`/`getSaleStatus`/`checkPurchaseStatus` with
-  `SaleRepository`/`PurchaseRepository`/`PurchaseGateway` mocked via `jest.fn()`.
+  Decision 6 below. The table also carries a `sold_count` column (Decision 3.6) so
+  `getSaleStatus()` and Redis bootstrap never run `COUNT(*)` over `purchases`.
+- Done — Backend: `PurchaseGateway.isBootstrapped()` skips Postgres entirely once a
+  sale's Redis stock key already exists — the DB is touched at most once per sale,
+  not once per request.
+- Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`), the queue
+  worker (`purchase-persistence.processor.test.ts`), and `PurchaseGateway`
+  (`purchase-gateway.test.ts`) — 34 tests total, `SaleRepository`/`PurchaseRepository`/
+  `PurchaseGateway`/`PurchasePersistenceQueue` mocked via `jest.fn()`.
 - Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
-  a real running Nest app over HTTP, against real Postgres and real Redis — every error
-  taxonomy code, the oversell invariant, and the duplicate-user invariant. See Testing
-  below.
+  a real running Nest app over HTTP, against real Postgres, real Redis, and a real
+  BullMQ worker — every error taxonomy code, the oversell invariant, the duplicate-user
+  invariant, and `sold_count` correctness after async persistence. See Testing below.
 - Done — Frontend wired to the real backend over HTTP (axios). See
   [app/frontend/README.md](app/frontend/README.md) for the client layer.
 - Done — Production frontend image supports runtime env injection (`window.__ENV__`,
@@ -33,8 +39,12 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   effect end-to-end, not just at the config-layer level.
 - Done — Stress tests at high concurrency (`npm run test:stress` in `app/backend`):
   10 iterations of stock=50/10,000-concurrent-user oversell, one duplicate-user run,
-  and one boundary run, all against the real running server. See Stress test results
-  below.
+  and one boundary run, all against the real running server. The script now polls for
+  the async worker to drain before asserting DB state — see Stress test results below;
+  note the numbers there predate the async-queue change and are due for a re-run.
+- Not started — Redis persistence (AOF) and two-way `lastUpdatedAt` reconciliation
+  between Redis and Postgres. See `docs/mentor-feedback-implementation-plan.md` for
+  the design.
 
 ## Quick start
 
@@ -200,16 +210,14 @@ app/
 ## Architecture
 
 The purchase decision runs as one atomic Redis Lua script (window check, per-user
-dedup, stock check, and decrement — all in a single round trip), then a synchronous
-Postgres insert records it durably. No message queue: at this scale (the brief says
-"thousands of users", not the 100k+ QPS the standard flash-sale writeups target) a
-single-row insert is not the bottleneck, and a queue would trade a rare, honest
-failure mode (see below) for an eventually-consistent one that's harder to reason
-about. See Key design decisions below for the full reasoning, and Known limitations
-for what this trades away.
+dedup, stock check, and decrement — all in a single round trip). Acceptance is
+returned to the caller immediately; the durable Postgres write happens off the
+request path, via a BullMQ job a worker drains asynchronously. See Key design
+decisions below for the full reasoning (Decision 3 covers why this moved off the
+request path), and Known limitations for what this trades away.
 
-This is implemented and exercised end-to-end over HTTP (manual `curl` verification for
-every endpoint and every error/status code combination). The diagrams below describe
+This is implemented and exercised end-to-end over HTTP (manual `curl` verification,
+plus the automated integration suite — see Testing). The diagram below describes
 what's actually running — one adjustment from the original target design: the sale is
 identified by a `:saleId` path param (currently always `"default"`, the one seeded
 sale row) rather than a single implicit global sale, since the sale's config now lives
@@ -218,15 +226,65 @@ in a database row instead of being baked into the service.
 **Source of truth: Postgres.** Redis is the fast gate that decides in real time;
 Postgres is the durable record Redis is reconciled against, not the other way
 around. If the two ever disagree, Postgres wins, and Redis is rebuilt from it — see
-Decision 2 below.
+Decision 2 below. (A two-way `lastUpdatedAt` reconciliation is planned but not yet
+built — see `docs/mentor-feedback-implementation-plan.md`.)
 
 ### Components
 
-![Component diagram: React frontend calling the three API endpoints, FlashSaleService orchestrating Postgres (sales, purchases) and Redis (purchase.lua, stock counter, buyers set)](assets/components.png)
+```mermaid
+flowchart LR
+    subgraph Client
+        FE["React frontend"]
+    end
+
+    subgraph API["NestJS API"]
+        Controller["FlashSaleController"]
+        Service["FlashSaleService"]
+    end
+
+    subgraph Redis["Redis"]
+        Lua["purchase.lua\n(window + dedup + stock, atomic)"]
+        StockKey[("stock counter")]
+        BuyersKey[("buyers set")]
+    end
+
+    subgraph Queue["BullMQ (Redis-backed)"]
+        Job["PersistPurchaseJob"]
+        Worker["PurchasePersistenceProcessor"]
+    end
+
+    subgraph PG["Postgres"]
+        Sales[("sales\n(config + sold_count)")]
+        Purchases[("purchases\nUNIQUE(sale_id, identifier)")]
+    end
+
+    FE -->|"GET status / POST purchase / GET purchase/:id"| Controller
+    Controller --> Service
+    Service -->|"read config + sold_count"| Sales
+    Service -->|"EVALSHA (accept/reject)"| Lua
+    Lua --> StockKey
+    Lua --> BuyersKey
+    Service -->|"enqueue on accept"| Job
+    Job --> Worker
+    Worker -->|"INSERT + sold_count++\n(one transaction)"| Purchases
+    Worker -.->|"compensate on\nexhausted retries"| Lua
+    Service -->|"checkPurchaseStatus"| Purchases
+```
 
 ### Request path for one purchase
 
-![Sequence diagram: user posts a purchase, API reads sale config from Postgres, EVALSHAs purchase.lua on Redis inside the critical section, then inserts into Postgres on acceptance or compensates Redis on a write failure](assets/sequence.png)
+1. `POST /purchase` reaches `FlashSaleService.attemptPurchase()`.
+2. If the sale's Redis stock key doesn't exist yet, it's bootstrapped once from
+   `sales.sold_count` (`PurchaseGateway.isBootstrapped()` skips this on every
+   subsequent request for the same sale).
+3. `EVALSHA purchase.lua` checks the window, per-user dedup, and stock, then
+   decrements and records the buyer — all atomically, in one Redis round trip.
+4. On accept, the response returns immediately (`accepted: true`); a
+   `PersistPurchaseJob` is enqueued in the same request.
+5. A `PurchasePersistenceProcessor` worker drains the queue, `INSERT`s the row and
+   increments `sales.sold_count` in one Postgres transaction. On failure it retries
+   with exponential backoff; once retries are exhausted, it compensates Redis
+   (gives the stock slot back, removes the buyer) so the slot isn't lost silently.
 
 ## Key design decisions
 
@@ -276,30 +334,60 @@ condition structurally, not by making it merely unlikely.
 **Decision 2: Postgres is the source of truth; Redis is an accelerator.**
 
 Chosen: Postgres holds the durable record with `UNIQUE(sale_id, identifier)`. Redis
-state can be fully reconstructed from Postgres (`COUNT(*)` on `purchases`, replayed
-into the Redis counter and buyer set on app startup).
+state can be fully reconstructed from Postgres (`sales.sold_count`, replayed into the
+Redis counter and buyer set the first time a sale is touched after a cold start).
 
 Rejected: Redis as the source of truth with Postgres as an archive. That would turn
 losing the Redis node into losing data, not just losing performance.
 
 Why: when the two disagree, Postgres wins, and the reconciliation direction is
-one-way and unambiguous — no runtime judgment call needed during a divergence.
+one-way and unambiguous — no runtime judgment call needed during a divergence. (A
+two-way, `lastUpdatedAt`-based reconciliation is planned on top of this — see
+`docs/mentor-feedback-implementation-plan.md` — but Postgres holding the durable
+ledger doesn't change.)
 
-**Decision 3: the database write is synchronous, no message queue.**
+**Decision 3: the database write is asynchronous, via a BullMQ queue.**
 
-Chosen: the `INSERT` happens in the same request, right after Redis accepts.
+Chosen: Redis's `EVALSHA` accepts or rejects the purchase and returns immediately; the
+`INSERT` (and the `sales.sold_count` bump) happens in a `PurchasePersistenceProcessor`
+worker draining a BullMQ queue, not in the request path.
 
-Rejected: a queue (Redis list or an external broker) with an async worker — the
-standard pattern in most large-scale flash-sale writeups.
+Rejected (original decision, since revised): a synchronous `INSERT` in the same
+request. That was the initial design — reasoned as "not the bottleneck at this brief's
+scale" — but async was requested explicitly (mentor feedback, see
+`docs/mentor-feedback-implementation-plan.md`) and decouples user-facing latency from
+the write, which is a real benefit even at this scale.
 
-Why: at the scale this brief describes ("thousands of users", not the 100k+ QPS the
-big write-ups target), a one-row insert is not the bottleneck. A queue would add a
-real failure mode instead — Redis accepts a purchase, the message is lost before a
-worker processes it, and the user holds a confirmation with no record behind it —
-and it would turn "check if I secured an item" into an eventually-consistent read,
-pushing the frontend toward polling for something the brief asks to keep simple.
-That complexity isn't paid for at this scale. See Known limitations for where this
-decision would change.
+Why this doesn't reopen the failure mode the original decision was worried about:
+the queue lives in the same Redis instance that already holds the durable stock
+counter, so a lost job isn't a silent unknown — a failed job retries with exponential
+backoff (3 attempts), and only once retries are exhausted does the worker compensate
+Redis (give the stock slot back, remove the buyer), so a permanently-failed write
+doesn't strand a phantom "sold" unit. `checkPurchaseStatus()` is the honest way for a
+client to confirm the row actually landed — `attemptPurchase`'s `accepted: true` means
+"Redis holds the slot and the write is queued," not "the row exists yet."
+
+**Decision 3.6: `sales.sold_count` is a stored counter, not a live `COUNT(*)`.**
+
+Chosen: `sales` carries a `sold_count` column, incremented in the same Postgres
+transaction as the `purchases` insert (in the worker from Decision 3). `getSaleStatus()`
+reads it directly; Redis bootstrap (`PurchaseGateway.bootstrap()`) seeds from it too,
+and only runs at all once per sale — `PurchaseGateway.isBootstrapped()` checks a Redis
+`EXISTS` first and skips both the read and the bootstrap call once the stock key
+already exists.
+
+Rejected: `COUNT(*)` on `purchases` on every `getSaleStatus()` call and every
+`attemptPurchase()` bootstrap check (the original design) — a full scan of a growing
+table for a number that only moves by ±1 per accepted purchase, on a call every page
+load / poll hits.
+
+Why: `sold_count` is a materialized read-model of `purchases`, not a second config
+source — Decision 6 below still holds for `totalStock`. Bootstrap now trusts
+`sold_count` rather than the true row count, which is a deliberate trade: if
+`sold_count` ever drifts from `purchases`' actual count, nothing currently re-derives
+it — that's exactly the gap the planned reconciliation (item 4 in
+`docs/mentor-feedback-implementation-plan.md`) is meant to close, so it's a bigger
+priority than originally scoped.
 
 **Decision 4: idempotency is separate from per-user dedup.**
 
@@ -313,9 +401,10 @@ load exactly when the system is under the most pressure.
 **Decision 3.5: `PurchaseRepository` wraps a Drizzle client, it doesn't extend one.**
 
 Chosen: a plain `@Injectable()` class holding an injected Drizzle client instance,
-exposing `findByIdentifier`, `count`, and `insertIfNotExists` — the last one using
-`.onConflictDoNothing()` against the `UNIQUE(sale_id, identifier)` index and treating
-an empty result as "already purchased" rather than throwing.
+exposing `findByIdentifier`, `count`, and `insertIfNotExists` — the last one running
+the `.onConflictDoNothing()` insert and the `sales.sold_count` increment inside one
+`db.transaction()`, treating an empty insert result as "already purchased" rather
+than throwing.
 
 Why: Drizzle has no ORM-style base `Repository` class to extend, unlike TypeORM.
 Rather than build one, the repository stays a thin wrapper — consistent with the
@@ -333,17 +422,17 @@ more time" for which of these would be next.
 **Decision 6: sale configuration lives in a `sales` table, not env vars.**
 
 Chosen: a `sales` table (`id`, `productName`, `productDescription`, `totalStock`,
-`startsAt`, `endsAt`) holding static config only — the live stock counter is not a
-column here, it lives in Redis, reconciled against `purchases` (see Decision 2). One
-row is seeded by migration with a fixed, well-known id (`"default"`), so the service
-never needs a "find the active sale" query — every endpoint takes `:saleId` as a path
-param and looks that row up directly.
+`startsAt`, `endsAt`) holding static config, plus `sold_count` as a materialized
+read-model (see Decision 3.6) — `totalStock` itself is never derived or mutated per
+purchase, only `sold_count` moves. One row is seeded by migration with a fixed,
+well-known id (`"default"`), so the service never needs a "find the active sale"
+query — every endpoint takes `:saleId` as a path param and looks that row up directly.
 
 Rejected: (a) env vars (`SALE_STOCK`, `SALE_START_AT`, ...) — not configurable without
 a redeploy, and weaker against the brief's "configurable start and end time" wording;
-(b) a live `stockRemaining` column on `sales`, updated per purchase — a second place
-stock would be tracked alongside the Redis counter and the `purchases` count, needing
-its own atomic update path for no benefit at this scope.
+(b) `sold_count` was originally rejected too, on the reasoning that a second place
+stock would be tracked alongside the Redis counter and the `purchases` count — revised
+in Decision 3.6 once avoiding a live `COUNT(*)` on every read became a requirement.
 
 Why: a real row (even a single hardcoded one) is closer to how this would actually be
 configured operationally, and it's what makes `:saleId` in the URL meaningful rather
@@ -419,7 +508,10 @@ an orchestrator should use to stop routing traffic to this instance, distinct fr
 ```
 
 **`POST .../purchase`** and **`GET .../purchase/:identifier`** both return the same
-shape — a discriminated union on `accepted`:
+shape — a discriminated union on `accepted`. Note `purchasedAt` means something
+slightly different in each: from `POST`, it's when Redis accepted the purchase (the
+durable row may still be draining through the queue); from `GET`, it's the durable
+row's own `created_at`.
 
 ```json
 // success
@@ -439,7 +531,7 @@ is meaningful too (see Decision 7 above for why both):
 | `ALREADY_PURCHASED` | 409 | This identifier already holds a purchase for this sale |
 | `SOLD_OUT` | 409 | Stock exhausted while the sale is still open |
 | `NOT_PURCHASED` | 200 | (`GET .../purchase/:identifier` only) this identifier hasn't purchased — not an error, the check itself succeeded |
-| `TEMPORARY_FAILURE` | 503 | Redis accepted the purchase but the Postgres write failed unexpectedly; the Redis slot is given back (compensated) before responding |
+| `TEMPORARY_FAILURE` | 503 | Redis accepted the purchase but enqueueing the persistence job failed; the Redis slot is given back (compensated) before responding |
 
 All of the above were verified manually end-to-end (`curl`, with the sale window and
 seed row adjusted to force each state) — see Testing below for what's automated
@@ -447,40 +539,52 @@ versus manual so far.
 
 ## Testing
 
-- **Unit (automated):** `flash-sale.test.ts` covers `FlashSaleService` in isolation —
-  `SaleRepository`, `PurchaseRepository`, and `PurchaseGateway` are all mocked with
-  `jest.fn()`, so this suite is fast and needs no infrastructure. Covers: the sale
-  window boundary logic (`resolveWindowStatus` — before/at/after `startsAt`/`endsAt`);
-  `getSaleStatus`'s `NotFoundException` and stock-remaining math (including the
-  `Math.max(..., 0)` floor when purchased count would otherwise push it negative);
-  `attemptPurchase`'s full branch set — gateway bootstrap args, a successful purchase,
-  each gateway rejection code (`SALE_NOT_STARTED`/`SALE_ENDED`/`SOLD_OUT`/`ALREADY_PURCHASED`)
-  passed through without touching the repository, the gateway-accepted-but-DB-unique-
-  constraint-already-held-a-row case, and the compensate-then-`TEMPORARY_FAILURE` path
-  when the DB write throws; and `checkPurchaseStatus`'s found/`NOT_PURCHASED` branches.
-  Run with `npm run test:backend` (or `npm --prefix app/backend run test`).
+- **Unit (automated):** 34 tests across three suites, run with `npm run test:backend`
+  (or `npm --prefix app/backend run test`):
+  - `flash-sale.test.ts` covers `FlashSaleService` in isolation — `SaleRepository`,
+    `PurchaseRepository`, `PurchaseGateway`, and `PurchasePersistenceQueue` are all
+    mocked with `jest.fn()`. Covers: the sale window boundary logic
+    (`resolveWindowStatus`); `getSaleStatus`'s `NotFoundException` and
+    stock-remaining math off `sale.soldCount` (including the `Math.max(..., 0)`
+    floor); `attemptPurchase`'s full branch set — bootstrapping from `soldCount`
+    only when `isBootstrapped()` is false, skipping Postgres entirely when it's
+    already bootstrapped, a successful purchase enqueueing the persistence job,
+    each gateway rejection code passed through without enqueueing, and the
+    compensate-then-`TEMPORARY_FAILURE` path when enqueueing itself fails; and
+    `checkPurchaseStatus`'s found/`NOT_PURCHASED` branches.
+  - `purchase-gateway.test.ts` covers `PurchaseGateway.isBootstrapped()` (Redis
+    `EXISTS`) alongside the existing `bootstrap`/`compensate` coverage.
+  - `purchase-persistence.processor.test.ts` covers the queue worker: a normal
+    insert, the defensive no-op when the row already exists, letting an error
+    propagate so BullMQ retries, and `onFailed` only compensating once
+    `attemptsMade` reaches the configured max (not on every failed attempt).
 - **Integration (automated):** `flash-sale.integration.test.ts` boots the real Nest
   application (Fastify adapter, same `ValidationPipe` as `main.ts`) and drives it over
-  HTTP with `supertest`, against the real Postgres and Redis started by
-  `docker compose` — deliberately not mocked, since mocking Redis here would defeat
-  the point of testing the atomic decision (section 4.3 of the working notes). Each
-  test seeds its own `sales` row with a window relative to `Date.now()` (not the fixed
-  seeded `default` row, which goes stale) and cleans up its own `purchases` rows plus
-  the sale's Redis keys afterwards, so tests don't interfere with each other or with a
-  manually-running dev server. Covers:
+  HTTP with `supertest`, against the real Postgres, real Redis, and a real BullMQ
+  worker started by `docker compose` — deliberately not mocked, since mocking Redis
+  here would defeat the point of testing the atomic decision (section 4.3 of the
+  working notes). Each test seeds its own `sales` row with a window relative to
+  `Date.now()` (not the fixed seeded `default` row, which goes stale) and cleans up
+  its own `purchases` rows plus the sale's Redis keys afterwards, so tests don't
+  interfere with each other or with a manually-running dev server. Since the
+  Postgres write is now asynchronous, tests assert DB state through a
+  `waitForPurchaseRows()` polling helper rather than immediately after the HTTP
+  response — a 200 only means Redis accepted the purchase, not that the row exists
+  yet. Covers:
   - Every status/error code in the taxonomy table: `SALE_NOT_STARTED` (403),
     `SALE_ENDED` (410), `ALREADY_PURCHASED` (409), `SOLD_OUT` (409), `NOT_PURCHASED`
     (200), and a successful purchase (200), each asserted against both the HTTP
-    response and the underlying Postgres/Redis state.
+    response and the underlying Postgres/Redis state — including `sales.sold_count`
+    landing at the expected value once the worker drains.
   - **Idempotency** (Decision 4): the same identifier purchasing twice sequentially
     returns `ALREADY_PURCHASED` on the second call, with exactly one row in `purchases`.
   - **Oversell invariant:** stock `S = 5`, `15` concurrent requests from distinct
     identifiers (lowered from `30` — see the CI note below) — asserts exactly `5`
-    accepted, `10` `SOLD_OUT`, the Redis stock key at exactly `0`, and exactly `5`
-    rows in `purchases`.
+    accepted, `10` `SOLD_OUT`, the Redis stock key at exactly `0`, exactly `5` rows
+    in `purchases`, and `sold_count = 5` once the worker drains.
   - **Duplicate-user invariant:** one identifier firing `10` concurrent requests —
-    asserts exactly `1` accepted, `9` `ALREADY_PURCHASED`, and exactly `1` row in
-    `purchases`.
+    asserts exactly `1` accepted, `9` `ALREADY_PURCHASED`, exactly `1` row in
+    `purchases`, and `sold_count = 1`.
   - Malformed request body (`class-validator` DTO rejection) returns 400.
 
   Run with `npm run test:integration` (or `npm --prefix app/backend run
@@ -505,7 +609,10 @@ versus manual so far.
     via env, defaults `STRESS_TEST_STOCK=50`, `STRESS_TEST_CONCURRENCY=10000`,
     `STRESS_TEST_ITERATIONS=10`): stock `S`, `N ≫ S` concurrent distinct identifiers,
     asserts exactly `S` accepted, `N-S` `SOLD_OUT`, Redis stock key exactly `0`, and
-    exactly `S` rows in `purchases` — every iteration, not just the first.
+    exactly `S` rows in `purchases` — every iteration, not just the first. Since the
+    Postgres write is asynchronous, the DB-row assertion polls
+    (`waitForPurchaseRowCount()`) for the worker to drain rather than checking
+    immediately after the HTTP responses land.
   - **Duplicate-user invariant** (`STRESS_TEST_DUPLICATE_CONCURRENCY`, default `100`):
     one identifier firing `N` concurrent requests, asserts exactly `1` accepted and
     `N-1` `ALREADY_PURCHASED`.
@@ -565,6 +672,13 @@ versus manual so far.
   original failure visible in the log rather than hiding it.
 
 ## Stress test results
+
+**Note: the numbers below predate the async-queue change (Decision 3).** The
+correctness invariants (never more than `S` accepted, stock never negative) don't
+depend on whether the Postgres write is synchronous or queued — they're enforced
+entirely by the Redis Lua script — so they should still hold. The throughput numbers,
+however, no longer reflect the current request path (which now returns before the DB
+write happens) and are due for a re-run.
 
 **How to run:** `npm --prefix app/backend run test:stress`, against a running stack
 (`docker compose ... up -d db redis`, migrations applied, backend running on
@@ -626,8 +740,8 @@ synchronous per-request path through Fastify → Redis round trip → Postgres i
 HTTP response, serialized per request by Node's event loop and the `postgres-js`
 connection pool (`DB_POOL_MAX`, default 10, raised for this run — see `.env`). Raising
 `DB_POOL_MAX`, running the backend across multiple processes behind a load balancer,
-or moving the Postgres insert off the request's critical path (see "What I would do
-differently," the message-queue item) would each raise this ceiling without touching
+or moving the Postgres insert off the request's critical path (since done — see
+Decision 3) would each raise this ceiling without touching
 the correctness mechanism, which is the point: throughput and correctness are
 separable here by construction, and this run is evidence for the second, not a claim
 about the first.
@@ -728,13 +842,22 @@ and `SALE_ENDED`/410 both correct.
 
 ## Known limitations
 
-- **The Redis decrement and the Postgres insert are not atomic with each other.**
-  If the process dies between the two, one unit of stock is lost — the system
-  undersells, it does not oversell. This is a deliberate trade-off, not an oversight:
-  overselling is a customer-facing failure (promising an item that doesn't exist);
-  underselling one unit out of a hundred is an internal loss that can be
-  reconciled later. Closing this gap would require a reservation with a TTL and a
-  confirm/rollback state machine — complexity that isn't justified at this scale.
+- **The Redis decrement and the Postgres insert are still not atomic with each
+  other.** The queue (Decision 3) narrows this gap — a failed persist job retries
+  with backoff and only compensates Redis once retries are exhausted — but doesn't
+  close it: if the worker process itself dies mid-job (not just the write failing),
+  the job can be lost without a compensating give-back, and stock is undersold by
+  one unit. This is a deliberate trade-off, not an oversight: overselling is a
+  customer-facing failure (promising an item that doesn't exist); underselling one
+  unit out of a hundred is an internal loss that can be reconciled later. Closing
+  this gap fully would require a reservation with a TTL and a confirm/rollback state
+  machine — complexity that isn't justified at this scale.
+- **`sales.sold_count` can drift from `purchases`' true row count with nothing to
+  self-correct it.** Redis bootstrap now seeds from `sold_count` rather than a fresh
+  `COUNT(*)` (Decision 3.6) — a deliberate trade for avoiding a DB round trip on
+  every cold start, but it means a drift (from a bug, or manual DB intervention)
+  would propagate into Redis too. The planned fix is the two-way `lastUpdatedAt`
+  reconciliation in `docs/mentor-feedback-implementation-plan.md` (not yet built).
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
 - **The stress test runs against one backend process and one Redis instance, on a
@@ -767,9 +890,12 @@ and `SALE_ENDED`/410 both correct.
 
 ## What I would do differently with more time
 
-- **A message queue in front of the Postgres write**, once insert throughput (not
-  Redis) is the measured bottleneck — decouples user-facing latency from the write,
-  at the cost of an eventually-consistent "check my purchase" endpoint.
+- **Redis persistence (AOF)** so the stock counter and buyers set survive a Redis
+  restart without needing to reseed from Postgres — designed in
+  `docs/mentor-feedback-implementation-plan.md`, not yet built.
+- **Two-way `lastUpdatedAt` reconciliation** between Redis and Postgres, run on
+  startup and periodically, so a `sold_count` drift (see Known limitations) can
+  self-correct instead of persisting indefinitely — also designed, not yet built.
 - **A virtual waiting room** (Redis sorted set admission control) if traffic were an
   order of magnitude higher than "thousands of users" — solves an admission problem
   this brief's scale doesn't have.
@@ -778,4 +904,4 @@ and `SALE_ENDED`/410 both correct.
 - **Rate limiting and bot gating** — a large share of flash-sale traffic in the wild
   is automated; not modeled here.
 - **A reservation-with-TTL state machine** to close the undersell gap noted above,
-  if losing even one unit of stock became unacceptable.
+  if losing even one unit of stock became unacceptable even under a worker crash.

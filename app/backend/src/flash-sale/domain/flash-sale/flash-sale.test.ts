@@ -3,6 +3,7 @@ import { FlashSaleService } from "src/flash-sale/domain/flash-sale/flash-sale.se
 import { SaleRepository } from "src/flash-sale/infrastructure/repository/sale/sale.repository";
 import { PurchaseRepository } from "src/flash-sale/infrastructure/repository/purchase/purchase.repository";
 import { PurchaseGateway } from "src/flash-sale/infrastructure/redis/purchase-gateway";
+import { PurchasePersistenceQueue } from "src/flash-sale/infrastructure/queue/purchase-persistence.queue";
 import { PurchaseErrorCode } from "src/flash-sale/types/purchase";
 import { SaleWindowStatus } from "src/flash-sale/types/sale-status";
 import { SaleRow } from "src/flash-sale/infrastructure/repository/sale/sale.entity";
@@ -15,6 +16,7 @@ function buildSale(overrides: Partial<SaleRow> = {}): SaleRow {
     totalStock: 10,
     startsAt: new Date("2026-09-09T10:00:00Z"),
     endsAt: new Date("2026-09-09T12:00:00Z"),
+    soldCount: 0,
     ...overrides,
   };
 }
@@ -31,14 +33,19 @@ function buildService() {
   } as unknown as jest.Mocked<PurchaseRepository>;
 
   const purchaseGateway = {
+    isBootstrapped: jest.fn().mockResolvedValue(false),
     bootstrap: jest.fn(),
     attemptPurchase: jest.fn(),
     compensate: jest.fn(),
   } as unknown as jest.Mocked<PurchaseGateway>;
 
-  const service = new FlashSaleService(saleRepository, purchaseRepository, purchaseGateway);
+  const purchasePersistenceQueue = {
+    enqueue: jest.fn(),
+  } as unknown as jest.Mocked<PurchasePersistenceQueue>;
 
-  return { service, saleRepository, purchaseRepository, purchaseGateway };
+  const service = new FlashSaleService(saleRepository, purchaseRepository, purchaseGateway, purchasePersistenceQueue);
+
+  return { service, saleRepository, purchaseRepository, purchaseGateway, purchasePersistenceQueue };
 }
 
 interface FlashSaleServiceWithWindowResolver {
@@ -85,10 +92,9 @@ describe("FlashSaleService", () => {
       await expect(service.getSaleStatus("missing")).rejects.toBeInstanceOf(NotFoundException);
     });
 
-    it("computes stockRemaining as totalStock minus purchased count", async () => {
-      const { service, saleRepository, purchaseRepository } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10 }));
-      purchaseRepository.count.mockResolvedValue(3);
+    it("computes stockRemaining as totalStock minus the stored soldCount", async () => {
+      const { service, saleRepository } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10, soldCount: 3 }));
 
       const status = await service.getSaleStatus("test-sale");
 
@@ -96,10 +102,9 @@ describe("FlashSaleService", () => {
       expect(status.totalStock).toBe(10);
     });
 
-    it("never reports negative stockRemaining, even if purchased count exceeds totalStock", async () => {
-      const { service, saleRepository, purchaseRepository } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 5 }));
-      purchaseRepository.count.mockResolvedValue(9);
+    it("never reports negative stockRemaining, even if soldCount exceeds totalStock", async () => {
+      const { service, saleRepository } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 5, soldCount: 9 }));
 
       const status = await service.getSaleStatus("test-sale");
 
@@ -107,11 +112,10 @@ describe("FlashSaleService", () => {
     });
 
     it("reports the window status alongside stock", async () => {
-      const { service, saleRepository, purchaseRepository } = buildService();
+      const { service, saleRepository } = buildService();
       saleRepository.findById.mockResolvedValue(
         buildSale({ startsAt: new Date(Date.now() + 3600_000), endsAt: new Date(Date.now() + 7200_000) }),
       );
-      purchaseRepository.count.mockResolvedValue(0);
 
       const status = await service.getSaleStatus("test-sale");
 
@@ -121,14 +125,6 @@ describe("FlashSaleService", () => {
     it("throws InternalServerErrorException when the sale lookup rejects unexpectedly", async () => {
       const { service, saleRepository } = buildService();
       saleRepository.findById.mockRejectedValue(new Error("connection reset"));
-
-      await expect(service.getSaleStatus("test-sale")).rejects.toBeInstanceOf(InternalServerErrorException);
-    });
-
-    it("throws InternalServerErrorException when the purchase count query rejects unexpectedly", async () => {
-      const { service, saleRepository, purchaseRepository } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockRejectedValue(new Error("connection reset"));
 
       await expect(service.getSaleStatus("test-sale")).rejects.toBeInstanceOf(InternalServerErrorException);
     });
@@ -149,47 +145,41 @@ describe("FlashSaleService", () => {
       await expect(service.attemptPurchase("test-sale", "alice")).rejects.toBeInstanceOf(InternalServerErrorException);
     });
 
-    it("throws InternalServerErrorException when the purchase count query rejects unexpectedly", async () => {
-      const { service, saleRepository, purchaseRepository } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockRejectedValue(new Error("connection reset"));
-
-      await expect(service.attemptPurchase("test-sale", "alice")).rejects.toBeInstanceOf(InternalServerErrorException);
-    });
-
-    it("bootstraps the gateway with the correct stock before attempting", async () => {
-      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10 }));
-      purchaseRepository.count.mockResolvedValue(4);
+    it("bootstraps the gateway from sale.soldCount when not yet bootstrapped", async () => {
+      const { service, saleRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10, soldCount: 4 }));
+      purchaseGateway.isBootstrapped.mockResolvedValue(false);
       purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
-      purchaseRepository.insertIfNotExists.mockResolvedValue({
-        id: "p1",
-        saleId: "test-sale",
-        identifier: "alice",
-        createdAt: new Date("2026-09-09T11:00:00Z"),
-      });
+      purchasePersistenceQueue.enqueue.mockResolvedValue(undefined);
 
       await service.attemptPurchase("test-sale", "alice");
 
       expect(purchaseGateway.bootstrap).toHaveBeenCalledWith("test-sale", 10, 4);
     });
 
-    it("returns accepted:true with the persisted purchase on success", async () => {
-      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockResolvedValue(0);
+    it("skips bootstrap entirely (no DB touched) once the sale is already bootstrapped", async () => {
+      const { service, saleRepository, purchaseRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10 }));
+      purchaseGateway.isBootstrapped.mockResolvedValue(true);
       purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
-      const createdAt = new Date("2026-09-09T11:00:00Z");
-      purchaseRepository.insertIfNotExists.mockResolvedValue({
-        id: "p1",
-        saleId: "test-sale",
-        identifier: "alice",
-        createdAt,
-      });
+      purchasePersistenceQueue.enqueue.mockResolvedValue(undefined);
+
+      await service.attemptPurchase("test-sale", "alice");
+
+      expect(purchaseRepository.count).not.toHaveBeenCalled();
+      expect(purchaseGateway.bootstrap).not.toHaveBeenCalled();
+    });
+
+    it("returns accepted:true and enqueues the durable write on success", async () => {
+      const { service, saleRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale());
+      purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
+      purchasePersistenceQueue.enqueue.mockResolvedValue(undefined);
 
       const result = await service.attemptPurchase("test-sale", "alice");
 
-      expect(result).toEqual({ accepted: true, identifier: "alice", purchasedAt: createdAt.toISOString() });
+      expect(result).toEqual({ accepted: true, identifier: "alice", purchasedAt: expect.any(String) });
+      expect(purchasePersistenceQueue.enqueue).toHaveBeenCalledWith({ saleId: "test-sale", identifier: "alice" });
     });
 
     it.each([
@@ -197,40 +187,22 @@ describe("FlashSaleService", () => {
       PurchaseErrorCode.SALE_ENDED,
       PurchaseErrorCode.SOLD_OUT,
       PurchaseErrorCode.ALREADY_PURCHASED,
-    ])("propagates a %s rejection from the gateway without touching the repository", async (code) => {
-      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
+    ])("propagates a %s rejection from the gateway without enqueueing a persistence job", async (code) => {
+      const { service, saleRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
       saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockResolvedValue(0);
       purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: false, code });
 
       const result = await service.attemptPurchase("test-sale", "alice");
 
       expect(result).toEqual({ accepted: false, code, message: expect.any(String) });
-      expect(purchaseRepository.insertIfNotExists).not.toHaveBeenCalled();
+      expect(purchasePersistenceQueue.enqueue).not.toHaveBeenCalled();
     });
 
-    it("returns ALREADY_PURCHASED when the gateway accepts but the DB unique constraint already held a row", async () => {
-      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
+    it("compensates the gateway and returns TEMPORARY_FAILURE when enqueueing the persistence job fails", async () => {
+      const { service, saleRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
       saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockResolvedValue(0);
       purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
-      purchaseRepository.insertIfNotExists.mockResolvedValue(null);
-
-      const result = await service.attemptPurchase("test-sale", "alice");
-
-      expect(result).toEqual({
-        accepted: false,
-        code: PurchaseErrorCode.ALREADY_PURCHASED,
-        message: expect.any(String),
-      });
-    });
-
-    it("compensates the gateway and returns TEMPORARY_FAILURE when the DB write throws unexpectedly", async () => {
-      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
-      saleRepository.findById.mockResolvedValue(buildSale());
-      purchaseRepository.count.mockResolvedValue(0);
-      purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
-      purchaseRepository.insertIfNotExists.mockRejectedValue(new Error("connection reset"));
+      purchasePersistenceQueue.enqueue.mockRejectedValue(new Error("redis connection reset"));
 
       const result = await service.attemptPurchase("test-sale", "alice");
 

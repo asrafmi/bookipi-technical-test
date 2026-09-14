@@ -4,6 +4,7 @@ import { PurchaseResult, SaleStatus } from "src/flash-sale/domain/flash-sale/fla
 import { SaleRepository } from "src/flash-sale/infrastructure/repository/sale/sale.repository";
 import { PurchaseRepository } from "src/flash-sale/infrastructure/repository/purchase/purchase.repository";
 import { PurchaseGateway } from "src/flash-sale/infrastructure/redis/purchase-gateway";
+import { PurchasePersistenceQueue } from "src/flash-sale/infrastructure/queue/purchase-persistence.queue";
 import awaitToError from "src/common/error/await-to-error";
 import { PurchaseErrorCode } from "src/flash-sale/types/purchase";
 
@@ -22,6 +23,7 @@ export class FlashSaleService {
     private readonly saleRepository: SaleRepository,
     private readonly purchaseRepository: PurchaseRepository,
     private readonly purchaseGateway: PurchaseGateway,
+    private readonly purchasePersistenceQueue: PurchasePersistenceQueue,
   ) { }
 
   private failure(code: PurchaseErrorCode): PurchaseResult {
@@ -42,10 +44,8 @@ export class FlashSaleService {
     const now = new Date();
     const status = this.resolveWindowStatus(now, sale.startsAt, sale.endsAt);
 
-    const [errCount, purchasedCount] = await awaitToError(this.purchaseRepository.count(saleId));
-    if (errCount) throw new InternalServerErrorException("Failed to fetch purchase count");
-
-    const stockRemaining = Math.max(sale.totalStock - purchasedCount, 0);
+    // Read path only — never used to decide a purchase (see attemptPurchase).
+    const stockRemaining = Math.max(sale.totalStock - sale.soldCount, 0);
 
     return {
       status: status,
@@ -63,25 +63,24 @@ export class FlashSaleService {
     if (errSale) throw new InternalServerErrorException("Failed to fetch sale status");
     if (!sale) throw new NotFoundException("Sale not found");
 
-    const [errCount, purchasedCount] = await awaitToError(this.purchaseRepository.count(saleId));
-    if (errCount) throw new InternalServerErrorException("Failed to fetch purchase count");
-    await this.purchaseGateway.bootstrap(saleId, sale.totalStock, purchasedCount);
+    // Skip touching Postgres once the sale is already bootstrapped.
+    const isBootstrapped = await this.purchaseGateway.isBootstrapped(saleId);
+    if (!isBootstrapped) {
+      await this.purchaseGateway.bootstrap(saleId, sale.totalStock, sale.soldCount);
+    }
 
     const now = new Date();
     const gatewayResult = await this.purchaseGateway.attemptPurchase(saleId, identifier, now, sale.startsAt, sale.endsAt);
     if (!gatewayResult.accepted) return this.failure(gatewayResult.code);
 
-    const [errPurchase, purchase] = await awaitToError(this.purchaseRepository.insertIfNotExists({
-      saleId: saleId,
-      identifier: identifier,
-    }));
-    if (errPurchase) {
+    // accepted: true means queued, not yet durable — see checkPurchaseStatus.
+    const [errEnqueue] = await awaitToError(this.purchasePersistenceQueue.enqueue({ saleId, identifier }));
+    if (errEnqueue) {
       await this.purchaseGateway.compensate(saleId, identifier);
       return this.failure(PurchaseErrorCode.TEMPORARY_FAILURE);
     }
-    if (!purchase) return this.failure(PurchaseErrorCode.ALREADY_PURCHASED);
 
-    return { accepted: true, identifier: purchase.identifier, purchasedAt: purchase.createdAt.toISOString() };
+    return { accepted: true, identifier, purchasedAt: now.toISOString() };
   }
 
   async checkPurchaseStatus(saleId: string, identifier: string): Promise<PurchaseResult> {

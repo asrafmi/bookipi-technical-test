@@ -6,6 +6,7 @@ function buildGateway() {
     set: jest.fn(),
     incr: jest.fn(),
     srem: jest.fn(),
+    exists: jest.fn(),
     defineCommand: jest.fn(),
   } as unknown as jest.Mocked<RedisClient>;
 
@@ -14,6 +15,23 @@ function buildGateway() {
 }
 
 describe("PurchaseGateway", () => {
+  describe("isBootstrapped", () => {
+    it("returns true when the stock key exists", async () => {
+      const { gateway, redis } = buildGateway();
+      redis.exists.mockResolvedValue(1);
+
+      await expect(gateway.isBootstrapped("sale-1")).resolves.toBe(true);
+      expect(redis.exists).toHaveBeenCalledWith("sale:sale-1:stock");
+    });
+
+    it("returns false when the stock key doesn't exist", async () => {
+      const { gateway, redis } = buildGateway();
+      redis.exists.mockResolvedValue(0);
+
+      await expect(gateway.isBootstrapped("sale-1")).resolves.toBe(false);
+    });
+  });
+
   describe("bootstrap", () => {
     it("seeds the stock counter with a single atomic SET ... NX call", async () => {
       const { gateway, redis } = buildGateway();

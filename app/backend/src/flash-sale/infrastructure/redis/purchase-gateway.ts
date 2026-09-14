@@ -37,8 +37,12 @@ export class PurchaseGateway implements OnModuleInit {
     return `sale:${saleId}:buyers`;
   }
 
-  // SET ... NX in one round trip. EXISTS then SET would race and could
-  // re-stomp the counter under concurrent first-purchase requests.
+  // Short-circuit so callers can skip bootstrap once the sale already has a stock key.
+  async isBootstrapped(saleId: string): Promise<boolean> {
+    return (await this.redis.exists(this.stockKey(saleId))) === 1;
+  }
+
+  // SET ... NX in one round trip — EXISTS then SET would race under concurrent first-purchase requests.
   async bootstrap(saleId: string, totalStock: number, purchasedCount: number) {
     const stockKey = this.stockKey(saleId);
     await this.redis.set(stockKey, Math.max(totalStock - purchasedCount, 0), "NX");
