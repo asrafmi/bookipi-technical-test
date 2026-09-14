@@ -7,6 +7,7 @@ import {
   PersistPurchaseJobData,
   PURCHASE_PERSISTENCE_QUEUE,
 } from "src/flash-sale/infrastructure/queue/purchase-persistence.job";
+import awaitToError from "src/common/error/await-to-error";
 
 @Processor(PURCHASE_PERSISTENCE_QUEUE)
 export class PurchasePersistenceProcessor extends WorkerHost {
@@ -23,7 +24,13 @@ export class PurchasePersistenceProcessor extends WorkerHost {
   async process(job: Job<PersistPurchaseJobData>): Promise<void> {
     const { saleId, identifier } = job.data;
 
-    const purchase = await this.purchaseRepository.insertIfNotExists({ saleId, identifier });
+    const [error, purchase] = await awaitToError(this.purchaseRepository.insertIfNotExists({ saleId, identifier }));
+    if (error) {
+      this.logger.error(
+        `Failed to persist purchase for sale=${saleId} identifier=${identifier}: ${error.message}`,
+      );
+      throw error; // retry via BullMQ
+    }
     if (!purchase) {
       this.logger.warn(`Purchase already persisted for sale=${saleId} identifier=${identifier}, skipping`);
     }
