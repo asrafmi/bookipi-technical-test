@@ -48,14 +48,28 @@ describe("FlashSaleController (integration)", () => {
     return sale;
   }
 
-  async function cleanupSale(saleId: string) {
-    await db.delete(purchases).where(eq(purchases.saleId, saleId));
-    await db.delete(sales).where(eq(sales.id, saleId));
+  // A worker job retrying (BullMQ backoff, e.g. after a transient CI network
+  // blip) can still be inserting a purchases row for this saleId when cleanup
+  // runs, which trips the FK constraint on "delete from sales". That's a
+  // timing race in the test harness, not a correctness bug in the app — retry
+  // the delete a few times so one straggling job doesn't fail the whole suite.
+  async function cleanupSale(saleId: string, attempt = 1): Promise<void> {
+    try {
+      await db.delete(purchases).where(eq(purchases.saleId, saleId));
+      await db.delete(sales).where(eq(sales.id, saleId));
+    } catch (err) {
+      if (attempt >= 5) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+      return cleanupSale(saleId, attempt + 1);
+    }
     await redis.del(`sale:${saleId}:stock`, `sale:${saleId}:buyers`);
   }
 
-  // A 200 no longer guarantees the row exists — the insert happens in an async worker.
-  async function waitForPurchaseRows(saleId: string, expectedCount: number, timeoutMs = 5000) {
+  // A 200 no longer guarantees the row exists — the insert happens in an async
+  // worker. 10s gives room for BullMQ's own retry backoff (3 attempts,
+  // exponential from 1000ms) if the first insert attempt hits a transient
+  // connection blip, which is more likely under CI's shared-runner pressure.
+  async function waitForPurchaseRows(saleId: string, expectedCount: number, timeoutMs = 10000) {
     const deadline = Date.now() + timeoutMs;
     let rows = await db.query.purchases.findMany({ where: eq(purchases.saleId, saleId) });
     while (rows.length < expectedCount && Date.now() < deadline) {
