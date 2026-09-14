@@ -48,10 +48,11 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   frontend call site reads env through `lib/config.ts`, so this actually takes
   effect end-to-end, not just at the config-layer level.
 - Done — Stress tests at high concurrency (`npm run test:stress` in `app/backend`):
-  10 iterations of stock=50/10,000-concurrent-user oversell, one duplicate-user run,
-  and one boundary run, all against the real running server. The script now polls for
-  the async worker to drain before asserting DB state — see Stress test results below;
-  note the numbers there predate the async-queue change and are due for a re-run.
+  10 iterations of stock=50/concurrent-user oversell, one duplicate-user run, and one
+  boundary run, all against the real running server. The script polls for the async
+  worker to drain before asserting DB state. Re-run after the async-queue and
+  reconciliation changes, pushing `N` from the earlier `15,000` ceiling up to
+  `50,000` — see "Before vs. after" in Stress test results below.
 
 ## Quick start
 
@@ -693,12 +694,11 @@ versus manual so far.
 
 ## Stress test results
 
-**Note: the numbers below predate the async-queue change (Decision 3).** The
-correctness invariants (never more than `S` accepted, stock never negative) don't
-depend on whether the Postgres write is synchronous or queued — they're enforced
-entirely by the Redis Lua script — so they should still hold. The throughput numbers,
-however, no longer reflect the current request path (which now returns before the DB
-write happens) and are due for a re-run.
+**Note: the numbers immediately below (through `N = 15,000`) predate the durability
+redesign** — the async-queue change (Decision 3) and the rest of the durability work
+that followed it (Decisions 3.6–3.8). They're kept as the original historical record
+of how the atomic decision was validated. See "Before vs. after the durability
+redesign" further down for the post-redesign re-run, pushed up to `N = 50,000`.
 
 **How to run:** `npm --prefix app/backend run test:stress`, against a running stack
 (`docker compose ... up -d db redis`, migrations applied, backend running on
@@ -859,6 +859,91 @@ every run above: exactly 50 accepted, exactly 14,950 `SOLD_OUT`, Redis stock at 
 10,015ms, ≈1,498 req/s aggregate. Duplicate-user test at the same `N = 15,000`: exactly
 1 accepted, 14,999 `ALREADY_PURCHASED`. Boundary test unchanged: `SALE_NOT_STARTED`/403
 and `SALE_ENDED`/410 both correct.
+
+### Before vs. after the durability redesign
+
+Every run above predates the durability redesign (Decision 3's async BullMQ queue,
+Decision 3.6's stored `sold_count`, Decision 3.7's reconciliation, Decision 3.8's
+Redis persistence) — the Postgres write was still synchronous, in the request path,
+on every one of those runs. Re-running after that redesign landed, pushing `N` well
+past the earlier `15,000` ceiling to see where the new architecture's own limit
+actually sits:
+
+| | Before (sync write, N = 15,000 max tested) | After (async queue, N pushed to 50,000) |
+|---|---|---|
+| Postgres write | Synchronous, in the request path | Asynchronous, via BullMQ worker |
+| `getSaleStatus()` stock read | `COUNT(*)` over `purchases` | Stored `sales.sold_count` |
+| Redis bootstrap cost | `COUNT(*)` on every request until first bootstrap | `EXISTS` check only; `COUNT(*)`-equivalent read replaced by `sold_count` |
+| Redis restart | Cold — full reseed from Postgres on next request | AOF-persistent — survives restart, verified directly |
+| Redis/Postgres counter drift | No self-correction mechanism | `ReconciliationService`, two-way last-write-wins, startup + periodic |
+| Highest `N` tested | 15,000 (10/10 PASS) | 50,000 (10/10 PASS at every `N` from 25,000 to 50,000) |
+| Throughput at highest passing `N` | ≈1,498 req/s (N=15,000) | ≈2,403 req/s (N=50,000) |
+| Backend process | Containerized (`npm run docker:up`) | Native (`npm start`), Postgres/Redis still in Docker — see below |
+
+**The invariant held identically in both configurations at every `N` tested in
+either** — exactly `S` accepted, Redis stock at exactly `0`, exactly `S` rows in
+`purchases`, every single iteration, no exceptions. Async persistence didn't
+introduce a new failure mode into the oversell/dedup guarantee, which is the actual
+point: Decision 1's atomic Lua script is what enforces correctness, and nothing
+about the queue, the stored counter, reconciliation, or Redis persistence touches
+that mechanism.
+
+**Oversell test, post-redesign** — stock `S = 50`, every `N` pushed until the client
+itself became the bottleneck (see below), 10 iterations each:
+
+| N | Result | Avg iteration duration | Approx throughput |
+|---|---|---|---|
+| 25,000 | 10/10 PASS | 6.5s | ≈3,825 req/s |
+| 30,000 | 10/10 PASS | 8.6s | ≈3,500 req/s |
+| 35,000 | 10/10 PASS | 10.1s | ≈3,480 req/s |
+| 40,000 | 10/10 PASS | 11.2s | ≈3,578 req/s |
+| 45,000 | 10/10 PASS | 14.2s | ≈3,164 req/s |
+| **50,000** | **10/10 PASS** | **20.8s** | **≈2,403 req/s** |
+
+`N = 50,000` in full, the highest `N` reached with a clean pass:
+
+| Iter | Accepted | Sold out | Redis stock | DB rows | Duration (ms) | Result |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 49,950 | 0 | 50 | 25,526 | PASS |
+| 2 | 50 | 49,950 | 0 | 50 | 17,522 | PASS |
+| 3 | 50 | 49,950 | 0 | 50 | 15,743 | PASS |
+| 4 | 50 | 49,950 | 0 | 50 | 21,506 | PASS |
+| 5 | 50 | 49,950 | 0 | 50 | 22,277 | PASS |
+| 6 | 50 | 49,950 | 0 | 50 | 23,558 | PASS |
+| 7 | 50 | 49,950 | 0 | 50 | 24,804 | PASS |
+| 8 | 50 | 49,950 | 0 | 50 | 21,912 | PASS |
+| 9 | 50 | 49,950 | 0 | 50 | 17,700 | PASS |
+| 10 | 50 | 49,950 | 0 | 50 | 17,551 | PASS |
+
+Duplicate-user test at `N = 50,000`: exactly 1 accepted, 49,999 `ALREADY_PURCHASED`,
+exactly 1 row in `purchases`. Boundary test unchanged: `SALE_NOT_STARTED`/403 and
+`SALE_ENDED`/410 both correct. **Throughput visibly declines past 45,000** — worth
+watching as a possible early sign of a real ceiling, even though correctness never
+degraded at any `N` tried.
+
+**Why the higher `N` needed a native backend, not just more tuning:** pushing past
+`N = 20,000` against the Docker Compose stack failed with `UND_ERR_SOCKET` /
+`SocketError: other side closed` — and critically, **no corresponding request ever
+reached the backend's own logs**, meaning the failure was happening before the
+request got to the Nest process at all. That points at Docker's port-forwarding
+proxy (its own listen backlog, separate from and not tunable via the container's
+`somaxconn`) as the ceiling, not the application. Running the backend natively
+(`npm run build && npm start`, hitting `localhost:3000` directly with Postgres and
+Redis still in Docker) removed that layer and immediately raised the working
+ceiling to 30,000, then 50,000, with `DB_POOL_MAX=300` (Postgres `max_connections`
+already at `500`). Worth flagging as a real deployment consideration, not just a
+test artifact: whatever fronts this service in front of real traffic (a reverse
+proxy, load balancer, or the Docker networking layer itself) needs its own listen
+backlog sized for the traffic, independent of anything tuned inside the container.
+
+One new failure shape showed up at very high `N` on the native setup too, worth
+noting for completeness: at `N = 35,000`, the *test client* itself ran out of
+process/system file descriptors (`ENFILE`, `ETIMEDOUT`, `ECONNRESET` across
+separate attempts) opening tens of thousands of outbound sockets in one
+`Promise.all` burst — not a server-side limit. Raising the shell's `ulimit -n` and
+macOS's system-wide `kern.maxfiles`/`kern.maxfilesperproc` resolved it with no code
+changes, and the identical `N = 35,000` config then passed cleanly, confirming the
+server was never the bottleneck at that `N`.
 
 ## Known limitations
 
