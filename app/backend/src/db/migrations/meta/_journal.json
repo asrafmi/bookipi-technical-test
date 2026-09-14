@@ -29,6 +29,13 @@
       "when": 1789376523238,
       "tag": "0003_add_sold_count_to_sales",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789384095290,
+      "tag": "0004_add_sold_count_updated_at",
+      "breakpoints": true
     }
   ]
 }

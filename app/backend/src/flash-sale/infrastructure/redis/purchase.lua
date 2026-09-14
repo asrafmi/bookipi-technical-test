@@ -1,5 +1,6 @@
 -- KEYS[1] = stock key (integer counter)
 -- KEYS[2] = buyers key (set of identifiers)
+-- KEYS[3] = stock updatedAt marker key
 -- ARGV[1] = identifier
 -- ARGV[2] = now (unix ms)
 -- ARGV[3] = startsAt (unix ms)
@@ -9,6 +10,7 @@
 
 local stockKey = KEYS[1]
 local buyersKey = KEYS[2]
+local updatedAtKey = KEYS[3]
 local identifier = ARGV[1]
 local now = tonumber(ARGV[2])
 local startsAt = tonumber(ARGV[3])
@@ -33,5 +35,6 @@ end
 
 redis.call("DECR", stockKey)
 redis.call("SADD", buyersKey, identifier)
+redis.call("SET", updatedAtKey, now)
 
 return "OK"

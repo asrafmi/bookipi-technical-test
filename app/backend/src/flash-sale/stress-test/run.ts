@@ -45,7 +45,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Add a small delay between iterations to avoid saturating the DB/Redis with back-to-back runs, which can cause false negatives in the stress test.
-const INTER_ITERATION_DELAY_MS = Number(process.env.STRESS_TEST_ITERATION_DELAY_MS ?? 2000);
+const INTER_ITERATION_DELAY_MS = Number(process.env.STRESS_TEST_ITERATION_DELAY_MS ?? 3000);
 
 interface PurchaseResponseBody {
   accepted: boolean;

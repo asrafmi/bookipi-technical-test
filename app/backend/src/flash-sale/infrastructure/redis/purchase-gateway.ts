@@ -11,6 +11,7 @@ type RedisWithAttemptPurchase = RedisClient & {
   attemptPurchase(
     stockKey: string,
     buyersKey: string,
+    updatedAtKey: string,
     identifier: string,
     now: number,
     startsAt: number,
@@ -18,13 +19,18 @@ type RedisWithAttemptPurchase = RedisClient & {
   ): Promise<string>;
 };
 
+export interface StockSnapshot {
+  stockRemaining: number | null;
+  updatedAt: Date | null;
+}
+
 @Injectable()
 export class PurchaseGateway implements OnModuleInit {
   constructor(@Inject(REDIS_CLIENT) private readonly redis: RedisClient) { }
 
   onModuleInit() {
     this.redis.defineCommand("attemptPurchase", {
-      numberOfKeys: 2,
+      numberOfKeys: 3,
       lua: LUA_SCRIPT,
     })
   }
@@ -35,6 +41,10 @@ export class PurchaseGateway implements OnModuleInit {
 
   private buyersKey(saleId: string) {
     return `sale:${saleId}:buyers`;
+  }
+
+  private updatedAtKey(saleId: string) {
+    return `sale:${saleId}:stock:updatedAt`;
   }
 
   // Short-circuit so callers can skip bootstrap once the sale already has a stock key.
@@ -52,6 +62,7 @@ export class PurchaseGateway implements OnModuleInit {
     const outcome = await (this.redis as RedisWithAttemptPurchase).attemptPurchase(
       this.stockKey(saleId),
       this.buyersKey(saleId),
+      this.updatedAtKey(saleId),
       identifier,
       now.getTime(),
       startsAt.getTime(),
@@ -65,5 +76,26 @@ export class PurchaseGateway implements OnModuleInit {
   async compensate(saleId: string, identifier: string) {
     await this.redis.incr(this.stockKey(saleId));
     await this.redis.srem(this.buyersKey(saleId), identifier);
+  }
+
+  // Reconciliation reads: null fields mean this side has no data yet (cold start).
+  async getStockSnapshot(saleId: string): Promise<StockSnapshot> {
+    const [stock, updatedAtRaw] = await Promise.all([
+      this.redis.get(this.stockKey(saleId)),
+      this.redis.get(this.updatedAtKey(saleId)),
+    ]);
+    return {
+      stockRemaining: stock === null ? null : Number(stock),
+      updatedAt: updatedAtRaw === null ? null : new Date(Number(updatedAtRaw)),
+    };
+  }
+
+  // Reconciliation write: Postgres won, overwrite Redis's counter and marker to match.
+  async overwriteStock(saleId: string, totalStock: number, soldCount: number, updatedAt: Date) {
+    await this.redis
+      .multi()
+      .set(this.stockKey(saleId), Math.max(totalStock - soldCount, 0))
+      .set(this.updatedAtKey(saleId), updatedAt.getTime())
+      .exec();
   }
 }

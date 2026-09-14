@@ -37,7 +37,7 @@ services:
       POSTGRES_USER: ${DB_USERNAME:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     # Keep this above DB_POOL_MAX with margin if the concurrency raised further.
-    command: ["postgres", "-c", "max_connections=200"]
+    command: ["postgres", "-c", "max_connections=500"]
     ports:
       - "${DB_PORT:-5432}:5432"
     volumes:
@@ -56,6 +56,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: always
+    # AOF persistence, everysec — bounds an unclean crash's data loss to ~1s.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:

@@ -22,10 +22,20 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 - Done — Backend: `PurchaseGateway.isBootstrapped()` skips Postgres entirely once a
   sale's Redis stock key already exists — the DB is touched at most once per sale,
   not once per request.
+- Done — Backend: two-way `lastUpdatedAt` reconciliation between Redis and Postgres
+  (`ReconciliationService`) — runs once at startup and then on a configurable interval
+  (`RECONCILIATION_INTERVAL_MS`), comparing Redis's stock marker against
+  `sales.sold_count_updated_at` and copying the newer side's count onto the older one.
+  Only ever touches the `sold_count`/marker read-model, never `purchases` rows or the
+  Redis buyers set. See Decision 3.7 below.
+- Done — Backend: Redis persistence (AOF, `appendfsync everysec`) enabled in both the
+  dev and production Docker Compose stacks — verified the stock counter and buyers set
+  survive a container restart. See Decision 3.8 below.
 - Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`), the queue
-  worker (`purchase-persistence.processor.test.ts`), and `PurchaseGateway`
-  (`purchase-gateway.test.ts`) — 34 tests total, `SaleRepository`/`PurchaseRepository`/
-  `PurchaseGateway`/`PurchasePersistenceQueue` mocked via `jest.fn()`.
+  worker (`purchase-persistence.processor.test.ts`), `PurchaseGateway`
+  (`purchase-gateway.test.ts`), and `ReconciliationService`
+  (`reconciliation.service.test.ts`) — 46 tests total, `SaleRepository`/
+  `PurchaseRepository`/`PurchaseGateway`/`PurchasePersistenceQueue` mocked via `jest.fn()`.
 - Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
   a real running Nest app over HTTP, against real Postgres, real Redis, and a real
   BullMQ worker — every error taxonomy code, the oversell invariant, the duplicate-user
@@ -42,9 +52,6 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
   and one boundary run, all against the real running server. The script now polls for
   the async worker to drain before asserting DB state — see Stress test results below;
   note the numbers there predate the async-queue change and are due for a re-run.
-- Not started — Redis persistence (AOF) and two-way `lastUpdatedAt` reconciliation
-  between Redis and Postgres. See `docs/mentor-feedback-implementation-plan.md` for
-  the design.
 
 ## Quick start
 
@@ -223,53 +230,19 @@ identified by a `:saleId` path param (currently always `"default"`, the one seed
 sale row) rather than a single implicit global sale, since the sale's config now lives
 in a database row instead of being baked into the service.
 
-**Source of truth: Postgres.** Redis is the fast gate that decides in real time;
-Postgres is the durable record Redis is reconciled against, not the other way
-around. If the two ever disagree, Postgres wins, and Redis is rebuilt from it — see
-Decision 2 below. (A two-way `lastUpdatedAt` reconciliation is planned but not yet
-built — see `docs/mentor-feedback-implementation-plan.md`.)
+**Source of truth: Postgres, for the purchase decision itself.** Redis is the fast
+gate that decides in real time; Postgres is the durable record of every individual
+purchase (`purchases`, `UNIQUE(sale_id, identifier)`), never overwritten by anything
+described below. The `sold_count` *counter* is a different story: a
+`ReconciliationService` runs a two-way, `lastUpdatedAt`-based last-write-wins
+comparison between Redis's stock marker and `sales.sold_count_updated_at`, at startup
+and on a configurable interval — whichever side is newer overwrites the older one's
+counter. See Decision 2 and Decision 3.7 below for why the counter and the ledger are
+reconciled differently.
 
 ### Components
 
-```mermaid
-flowchart LR
-    subgraph Client
-        FE["React frontend"]
-    end
-
-    subgraph API["NestJS API"]
-        Controller["FlashSaleController"]
-        Service["FlashSaleService"]
-    end
-
-    subgraph Redis["Redis"]
-        Lua["purchase.lua\n(window + dedup + stock, atomic)"]
-        StockKey[("stock counter")]
-        BuyersKey[("buyers set")]
-    end
-
-    subgraph Queue["BullMQ (Redis-backed)"]
-        Job["PersistPurchaseJob"]
-        Worker["PurchasePersistenceProcessor"]
-    end
-
-    subgraph PG["Postgres"]
-        Sales[("sales\n(config + sold_count)")]
-        Purchases[("purchases\nUNIQUE(sale_id, identifier)")]
-    end
-
-    FE -->|"GET status / POST purchase / GET purchase/:id"| Controller
-    Controller --> Service
-    Service -->|"read config + sold_count"| Sales
-    Service -->|"EVALSHA (accept/reject)"| Lua
-    Lua --> StockKey
-    Lua --> BuyersKey
-    Service -->|"enqueue on accept"| Job
-    Job --> Worker
-    Worker -->|"INSERT + sold_count++\n(one transaction)"| Purchases
-    Worker -.->|"compensate on\nexhausted retries"| Lua
-    Service -->|"checkPurchaseStatus"| Purchases
-```
+![Component diagram: React frontend calling the three API endpoints, FlashSaleService orchestrating Postgres (sales with sold_count, purchases), Redis (purchase.lua, stock counter + updatedAt marker, buyers set, AOF persistent), a BullMQ queue/worker for the async Postgres write, and a ReconciliationService running two-way last-write-wins between Redis's marker and Postgres's sold_count_updated_at](assets/components-new.png)
 
 ### Request path for one purchase
 
@@ -285,6 +258,11 @@ flowchart LR
    increments `sales.sold_count` in one Postgres transaction. On failure it retries
    with exponential backoff; once retries are exhausted, it compensates Redis
    (gives the stock slot back, removes the buyer) so the slot isn't lost silently.
+6. Independently of any single purchase, `ReconciliationService` runs at startup and
+   on a configurable interval: it compares Redis's stock `updatedAt` marker against
+   `sales.sold_count_updated_at` and copies whichever side is newer onto the older
+   one — self-healing any drift between the two counters (e.g. from step 5's own
+   compensate path, or a Redis restart) without needing a request to trigger it.
 
 ## Key design decisions
 
@@ -340,11 +318,11 @@ Redis counter and buyer set the first time a sale is touched after a cold start)
 Rejected: Redis as the source of truth with Postgres as an archive. That would turn
 losing the Redis node into losing data, not just losing performance.
 
-Why: when the two disagree, Postgres wins, and the reconciliation direction is
-one-way and unambiguous — no runtime judgment call needed during a divergence. (A
-two-way, `lastUpdatedAt`-based reconciliation is planned on top of this — see
-`docs/mentor-feedback-implementation-plan.md` — but Postgres holding the durable
-ledger doesn't change.)
+Why: when the two disagree on an individual purchase, Postgres wins — no runtime
+judgment call needed during a divergence. The `sold_count` counter is reconciled
+differently (Decision 3.7 below): a two-way, `lastUpdatedAt`-based last-write-wins
+comparison, not a one-way Postgres-always-wins — but that's scoped to the cached
+counter value, not to which side's individual purchase records are trusted.
 
 **Decision 3: the database write is asynchronous, via a BullMQ queue.**
 
@@ -354,9 +332,8 @@ worker draining a BullMQ queue, not in the request path.
 
 Rejected (original decision, since revised): a synchronous `INSERT` in the same
 request. That was the initial design — reasoned as "not the bottleneck at this brief's
-scale" — but async was requested explicitly (mentor feedback, see
-`docs/mentor-feedback-implementation-plan.md`) and decouples user-facing latency from
-the write, which is a real benefit even at this scale.
+scale" — but revised after further review, since decoupling user-facing latency from
+the write is a real benefit even at this scale.
 
 Why this doesn't reopen the failure mode the original decision was worried about:
 the queue lives in the same Redis instance that already holds the durable stock
@@ -382,12 +359,55 @@ table for a number that only moves by ±1 per accepted purchase, on a call every
 load / poll hits.
 
 Why: `sold_count` is a materialized read-model of `purchases`, not a second config
-source — Decision 6 below still holds for `totalStock`. Bootstrap now trusts
-`sold_count` rather than the true row count, which is a deliberate trade: if
-`sold_count` ever drifts from `purchases`' actual count, nothing currently re-derives
-it — that's exactly the gap the planned reconciliation (item 4 in
-`docs/mentor-feedback-implementation-plan.md`) is meant to close, so it's a bigger
-priority than originally scoped.
+source — Decision 6 below still holds for `totalStock`. Bootstrap trusts `sold_count`
+rather than the true row count, which is a deliberate trade: `sold_count` can in
+principle drift from `purchases`' actual count (a bug, manual DB intervention) — that
+gap is what Decision 3.7 below closes.
+
+**Decision 3.7: `sold_count` reconciliation is two-way, timestamp-based
+last-write-wins — not "Postgres always wins."**
+
+Chosen: both sides carry a comparable timestamp — `sales.sold_count_updated_at` in
+Postgres, a `sale:{id}:stock:updatedAt` marker in Redis, written atomically by
+`purchase.lua` in the same execution as the stock decrement. A `ReconciliationService`
+runs `reconcile(saleId)` once at startup and then on a configurable interval
+(`RECONCILIATION_INTERVAL_MS`, default 5 minutes): whichever side's timestamp is
+newer overwrites the older side's counter; a tie, or Redis having no marker at all
+(cold start), defaults to Postgres.
+
+Rejected: the simpler "Postgres always wins" direction that the rest of this document
+uses for the *purchase decision* (Decision 2) and for Redis's live stock counter
+generally. That's still correct for individual purchases — `purchases` rows and the
+Redis buyers set are never rewritten by reconciliation, in either direction, since
+`UNIQUE(sale_id, identifier)` and `SADD` dedup are the actual correctness mechanism
+there. But for the `sold_count` *cache value* specifically, a literal timestamp
+comparison was chosen deliberately over always trusting Postgres, so this reconciler
+can also repair Postgres's copy if a bug or manual edit ever put a wrong number there.
+
+Known sharp edge, accepted deliberately: after Decision 3 (async queue), a
+Redis-accepted purchase can sit queued briefly before the Postgres `INSERT` (and its
+`sold_count_updated_at` bump) lands. In that window Redis's marker is genuinely newer
+— correctly, under last-write-wins — so a reconcile pass mid-window can push Redis's
+count into `sales.sold_count` slightly ahead of what `purchases` can currently prove.
+This is a bounded, self-correcting lag tied to queue depth (it closes itself once the
+job drains and Postgres's own timestamp catches up), not unbounded drift.
+
+**Decision 3.8: Redis persistence is AOF with `appendfsync everysec`, not RDB.**
+
+Chosen: `redis-server --appendonly yes --appendfsync everysec`, set in both the dev
+and production Docker Compose files. Verified directly: set a key, restarted the
+Redis container, confirmed the key survived.
+
+Rejected: RDB-only snapshots (bigger data-loss window on an unclean crash, for
+something that's supposed to be the fast path) and AOF+RDB together (redundant —
+Postgres is already the actual source of truth per Decision 2, so a second on-disk
+copy inside Redis isn't buying proportional safety).
+
+Why: this doesn't fix a correctness gap on its own — `bootstrap()` (and now
+reconciliation, Decision 3.7) already rebuild Redis from Postgres on a cold start.
+What persistence buys is reducing *how often* that rebuild path has to run, and
+bounding the loss window on an unclean crash to about a second instead of losing the
+whole in-memory counter and buyers set outright.
 
 **Decision 4: idempotency is separate from per-user dedup.**
 
@@ -852,12 +872,14 @@ and `SALE_ENDED`/410 both correct.
   unit out of a hundred is an internal loss that can be reconciled later. Closing
   this gap fully would require a reservation with a TTL and a confirm/rollback state
   machine — complexity that isn't justified at this scale.
-- **`sales.sold_count` can drift from `purchases`' true row count with nothing to
-  self-correct it.** Redis bootstrap now seeds from `sold_count` rather than a fresh
-  `COUNT(*)` (Decision 3.6) — a deliberate trade for avoiding a DB round trip on
-  every cold start, but it means a drift (from a bug, or manual DB intervention)
-  would propagate into Redis too. The planned fix is the two-way `lastUpdatedAt`
-  reconciliation in `docs/mentor-feedback-implementation-plan.md` (not yet built).
+- **`sales.sold_count` can still drift briefly during an in-flight async write.**
+  Redis bootstrap seeds from `sold_count` rather than a fresh `COUNT(*)` (Decision
+  3.6), and `ReconciliationService` (Decision 3.7) now closes the gap where that
+  could go stale indefinitely — but there's a narrow, self-correcting window right
+  after a purchase is accepted and before its queued job lands: Redis is briefly
+  "more correct" than Postgres, a reconcile pass in that window will copy Redis's
+  number forward, and the two converge again once the job drains. Not an unbounded
+  drift, but worth knowing it exists.
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
 - **The stress test runs against one backend process and one Redis instance, on a
@@ -890,12 +912,9 @@ and `SALE_ENDED`/410 both correct.
 
 ## What I would do differently with more time
 
-- **Redis persistence (AOF)** so the stock counter and buyers set survive a Redis
-  restart without needing to reseed from Postgres — designed in
-  `docs/mentor-feedback-implementation-plan.md`, not yet built.
-- **Two-way `lastUpdatedAt` reconciliation** between Redis and Postgres, run on
-  startup and periodically, so a `sold_count` drift (see Known limitations) can
-  self-correct instead of persisting indefinitely — also designed, not yet built.
+- **A reservation-with-TTL state machine** for the Redis/Postgres write gap (Known
+  limitations above), if losing even one unit of stock on a worker crash became
+  unacceptable — the current retry+compensate narrows this but doesn't close it fully.
 - **A virtual waiting room** (Redis sorted set admission control) if traffic were an
   order of magnitude higher than "thousands of users" — solves an admission problem
   this brief's scale doesn't have.
@@ -903,5 +922,3 @@ and `SALE_ENDED`/410 both correct.
   single Redis instance's ceiling.
 - **Rate limiting and bot gating** — a large share of flash-sale traffic in the wild
   is automated; not modeled here.
-- **A reservation-with-TTL state machine** to close the undersell gap noted above,
-  if losing even one unit of stock became unacceptable even under a worker crash.

@@ -1,0 +1,1 @@
+ALTER TABLE "sales" ADD COLUMN "sold_count_updated_at" timestamp DEFAULT now() NOT NULL;

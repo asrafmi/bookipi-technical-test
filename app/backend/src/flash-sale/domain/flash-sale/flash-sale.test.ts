@@ -17,6 +17,7 @@ function buildSale(overrides: Partial<SaleRow> = {}): SaleRow {
     startsAt: new Date("2026-09-09T10:00:00Z"),
     endsAt: new Date("2026-09-09T12:00:00Z"),
     soldCount: 0,
+    soldCountUpdatedAt: new Date("2026-09-09T09:00:00Z"),
     ...overrides,
   };
 }
