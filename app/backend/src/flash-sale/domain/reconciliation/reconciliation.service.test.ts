@@ -28,6 +28,7 @@ function buildService() {
   const purchaseGateway = {
     getStockSnapshot: jest.fn(),
     overwriteStock: jest.fn(),
+    acquireReconcileLock: jest.fn().mockResolvedValue(true),
   } as unknown as jest.Mocked<PurchaseGateway>;
 
   const configService = {
@@ -40,6 +41,34 @@ function buildService() {
 
 describe("ReconciliationService", () => {
   describe("reconcile", () => {
+    it("acquires a per-sale lock before doing any work, using the configured interval as the TTL", async () => {
+      const { service, saleRepository, purchaseGateway } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale());
+      purchaseGateway.getStockSnapshot.mockResolvedValue({ stockRemaining: null, updatedAt: null });
+
+      await service.reconcile("sale-1");
+
+      expect(purchaseGateway.acquireReconcileLock).toHaveBeenCalledWith("sale-1", 300_000);
+    });
+
+    it("skips reconciling entirely when another instance already holds the lock", async () => {
+      const { service, saleRepository, purchaseGateway } = buildService();
+      purchaseGateway.acquireReconcileLock.mockResolvedValue(false);
+
+      await service.reconcile("sale-1");
+
+      expect(saleRepository.findById).not.toHaveBeenCalled();
+      expect(purchaseGateway.getStockSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("resolves without throwing when acquiring the lock rejects unexpectedly", async () => {
+      const { service, saleRepository, purchaseGateway } = buildService();
+      purchaseGateway.acquireReconcileLock.mockRejectedValue(new Error("redis down"));
+
+      await expect(service.reconcile("sale-1")).resolves.toBeUndefined();
+      expect(saleRepository.findById).not.toHaveBeenCalled();
+    });
+
     it("does nothing when the sale doesn't exist", async () => {
       const { service, saleRepository, purchaseGateway } = buildService();
       saleRepository.findById.mockResolvedValue(undefined);
@@ -61,9 +90,10 @@ describe("ReconciliationService", () => {
       expect(saleRepository.overwriteSoldCount).not.toHaveBeenCalled();
     });
 
-    it("rebuilds Redis from Postgres when Postgres is newer", async () => {
+    it("rebuilds Redis from Postgres when Postgres is newer and its target is not higher than Redis's current stock", async () => {
       const { service, saleRepository, purchaseGateway } = buildService();
-      const sale = buildSale({ soldCountUpdatedAt: new Date("2026-09-14T00:10:00Z") });
+      // totalStock 100, soldCount 30 -> target 70, at or below Redis's current 80: safe to lower.
+      const sale = buildSale({ totalStock: 100, soldCount: 30, soldCountUpdatedAt: new Date("2026-09-14T00:10:00Z") });
       saleRepository.findById.mockResolvedValue(sale);
       purchaseGateway.getStockSnapshot.mockResolvedValue({
         stockRemaining: 80,
@@ -72,14 +102,31 @@ describe("ReconciliationService", () => {
 
       await service.reconcile("sale-1");
 
-      expect(purchaseGateway.overwriteStock).toHaveBeenCalledWith("sale-1", 100, 10, sale.soldCountUpdatedAt);
+      expect(purchaseGateway.overwriteStock).toHaveBeenCalledWith("sale-1", 100, 30, sale.soldCountUpdatedAt);
       expect(saleRepository.overwriteSoldCount).not.toHaveBeenCalled();
     });
 
-    it("defaults to Postgres when both timestamps are exactly equal", async () => {
+    it("never raises Redis's stock, even when Postgres is newer — a queued job may not have landed yet", async () => {
+      const { service, saleRepository, purchaseGateway } = buildService();
+      // totalStock 100, soldCount 10 -> target 90, which is HIGHER than Redis's current 80.
+      // Postgres's soldCount looks stale-low only because the write is still queued.
+      const sale = buildSale({ totalStock: 100, soldCount: 10, soldCountUpdatedAt: new Date("2026-09-14T00:10:00Z") });
+      saleRepository.findById.mockResolvedValue(sale);
+      purchaseGateway.getStockSnapshot.mockResolvedValue({
+        stockRemaining: 80,
+        updatedAt: new Date("2026-09-14T00:05:00Z"),
+      });
+
+      await service.reconcile("sale-1");
+
+      expect(purchaseGateway.overwriteStock).not.toHaveBeenCalled();
+      expect(saleRepository.overwriteSoldCount).not.toHaveBeenCalled();
+    });
+
+    it("defaults to Postgres when both timestamps are exactly equal, subject to the same no-raise guard", async () => {
       const tie = new Date("2026-09-14T00:10:00Z");
       const { service, saleRepository, purchaseGateway } = buildService();
-      const sale = buildSale({ soldCountUpdatedAt: tie });
+      const sale = buildSale({ totalStock: 100, soldCount: 30, soldCountUpdatedAt: tie });
       saleRepository.findById.mockResolvedValue(sale);
       purchaseGateway.getStockSnapshot.mockResolvedValue({ stockRemaining: 80, updatedAt: tie });
 

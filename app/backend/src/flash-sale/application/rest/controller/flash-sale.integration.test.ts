@@ -344,5 +344,21 @@ describe("FlashSaleController (integration)", () => {
         await cleanupSale(sale.id);
       }
     });
+
+    it("returns PURCHASE_PENDING when Redis holds the slot but the row hasn't landed yet", async () => {
+      const sale = await seedSale({ totalStock: 5 });
+      try {
+        // Simulates the real race directly, without depending on worker timing:
+        // Redis already accepted this identifier (as attemptPurchase's Lua script
+        // would), but no purchases row exists yet.
+        await redis.sadd(`sale:${sale.id}:buyers`, "pending@example.com");
+
+        const res = await request(app.getHttpServer()).get(`/v1/flash-sale/${sale.id}/purchase/pending@example.com`);
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ accepted: false, code: PurchaseErrorCode.PURCHASE_PENDING });
+      } finally {
+        await cleanupSale(sale.id);
+      }
+    });
   });
 });

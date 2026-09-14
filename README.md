@@ -34,7 +34,7 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 - Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`), the queue
   worker (`purchase-persistence.processor.test.ts`), `PurchaseGateway`
   (`purchase-gateway.test.ts`), and `ReconciliationService`
-  (`reconciliation.service.test.ts`) — 51 tests total, `SaleRepository`/
+  (`reconciliation.service.test.ts`) — 65 tests total, `SaleRepository`/
   `PurchaseRepository`/`PurchaseGateway`/`PurchasePersistenceQueue` mocked via `jest.fn()`.
 - Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
   a real running Nest app over HTTP, against real Postgres, real Redis, and a real
@@ -349,10 +349,15 @@ client to confirm the row actually landed — `attemptPurchase`'s `accepted: tru
 
 Chosen: `sales` carries a `sold_count` column, incremented in the same Postgres
 transaction as the `purchases` insert (in the worker from Decision 3). `getSaleStatus()`
-reads it directly; Redis bootstrap (`PurchaseGateway.bootstrap()`) seeds from it too,
-and only runs at all once per sale — `PurchaseGateway.isBootstrapped()` checks a Redis
-`EXISTS` first and skips both the read and the bootstrap call once the stock key
-already exists.
+reads it directly; Redis bootstrap (`PurchaseGateway.bootstrap()`) seeds the stock
+counter from it too, and only runs at all once per sale — `PurchaseGateway.isBootstrapped()`
+checks a Redis `EXISTS` first and skips both the read and the bootstrap call once the
+stock key already exists. Bootstrap also rebuilds the buyers set (`SADD` in the same
+`MULTI` as the counter `SET ... NX`), from `PurchaseRepository.findIdentifiers()` —
+a gap found after the fact (see the bug note under Decision 3.8) where a Redis
+restart that lost the buyers set but kept the stock counter would let a past buyer
+purchase a second time; the set is now rebuilt from the same durable ledger the
+counter is.
 
 Rejected: `COUNT(*)` on `purchases` on every `getSaleStatus()` call and every
 `attemptPurchase()` bootstrap check (the original design) — a full scan of a growing
@@ -364,6 +369,32 @@ source — Decision 6 below still holds for `totalStock`. Bootstrap trusts `sold
 rather than the true row count, which is a deliberate trade: `sold_count` can in
 principle drift from `purchases`' actual count (a bug, manual DB intervention) — that
 gap is what Decision 3.7 below closes.
+
+**Bug found and fixed: bootstrap only rebuilt the stock counter, never the buyers
+set.** `PurchaseGateway.bootstrap()` restores the stock counter from `sold_count`
+on a cold start, but originally never touched the buyers set — so a Redis restart
+that lost the AOF window's last write (`appendfsync everysec` bounds this to ~1s,
+per Decision 3.8 below, but doesn't eliminate it) could come back with the correct
+stock count and an empty buyers set. The next request from someone who had already
+bought would pass `SISMEMBER`, the Lua script would `DECR`, and the worker would
+find the row already there — `insertIfNotExists` returning `null` — and the
+original code just logged a warning. One unit of stock quietly disappeared, and
+the person who caused it *could have bought again*, since nothing had re-added
+them to the buyers set. Verified directly: seeded two purchases, deleted all
+three of the sale's Redis keys (simulating an unclean restart with total AOF
+loss), triggered a bootstrap via a new purchase attempt, confirmed both prior
+buyers reappeared in the buyers set, and confirmed a repeat purchase attempt from
+one of them correctly returned `ALREADY_PURCHASED` rather than succeeding. Fixed
+two ways: bootstrap now also `SADD`s every existing identifier (from
+`PurchaseRepository.findIdentifiers()`) into the buyers set in the same `MULTI`
+as the counter `SET ... NX`; and the worker's row-already-exists branch now
+calls a new `PurchaseGateway.releaseStock()` — `INCR` the counter back, but
+deliberately **not** `SREM` the identifier, since that person genuinely did
+purchase and removing them would let them buy again. `compensate()` (used when
+Redis accepted but enqueueing itself failed — nobody purchased) still does the
+full `INCR` + `SREM` + marker `SET`; `releaseStock()` is the narrower "give the
+slot back without denying the purchase happened" operation — these are not
+interchangeable.
 
 **Decision 3.7: `sold_count` reconciliation is two-way, timestamp-based
 last-write-wins — not "Postgres always wins."**
@@ -409,6 +440,43 @@ and moving `compensate()`'s three writes (`INCR`, `SREM`, marker `SET`) into one
 Redis `MULTI`. Covered by a new integration assertion (`soldCountUpdatedAt` must
 advance past the seeded value after a purchase) and an updated `purchase-gateway.test.ts`
 that asserts `compensate` writes all three through one `MULTI`.
+
+**Bug found and fixed: the "Postgres wins" branch could raise Redis's stock,
+reopening an oversell window.** The known sharp edge above (a queued purchase can
+make Redis's marker look newer than Postgres's for a moment) has a sharper
+consequence than originally scoped: when that window closes and a reconcile pass
+runs on the *next* tick — Postgres now looks newer, since its own write finally
+landed — the naive "Postgres wins → overwrite Redis with `totalStock - soldCount`"
+rule doesn't distinguish *lowering* Redis's counter (always safe — worst case,
+delays a sale by one reconcile interval) from *raising* it (never safe — it can
+hand out a slot that's already been decremented for a request still resolving).
+If a burst of purchases is still draining when a reconcile pass computes a target
+from a `soldCount` that hasn't caught up yet, "Postgres wins" could raise Redis's
+counter back up, undoing decrements from purchases already in flight. Fixed by
+comparing the *direction*, not just the timestamp: `reconcile()` now computes
+`totalStock - soldCount` and only writes it to Redis when that target is `<=`
+Redis's current stock; a target that would raise the counter is silently skipped
+(the next pass, once Postgres's own write lands, will find the two numbers
+agree and do nothing). Never reproduced under the stress tests — the default
+5-minute reconcile interval and a queue that drains in seconds mean a reconcile
+pass essentially never lands mid-burst — but the code path existed and the fix
+is a one-way invariant (never raise), not a race-timing workaround, so it holds
+regardless of interval or queue depth. Covered in `reconciliation.service.test.ts`
+by asserting `overwriteStock` is *not* called when the computed target exceeds
+Redis's current stock, even though the timestamp comparison alone would pick
+Postgres.
+
+**Reconciliation locking, for the multi-instance case this project doesn't
+currently run.** `reconcile(saleId)` now calls `PurchaseGateway.acquireReconcileLock()`
+first — `SET reconcile:lock:<saleId> NX PX <intervalMs>` — and returns immediately
+if it doesn't get the lock. With one backend process (Decision 5's stance on
+horizontal deployment), this is a no-op: there's only ever one timer, so nothing
+contends for the lock. It exists so nothing changes if that assumption is
+revisited — running two instances without it would mean two reconcilers evaluating
+the same last-write-wins comparison independently, occasionally disagreeing on
+which side "wins" for a given tick and issuing conflicting writes. The lock makes
+"exactly one reconciler acts per sale per interval" true regardless of instance
+count, not just true by accident because there's only one instance today.
 
 **Decision 3.8: Redis persistence is AOF with `appendfsync everysec`, not RDB.**
 
@@ -569,7 +637,26 @@ is meaningful too (see Decision 7 above for why both):
 | `ALREADY_PURCHASED` | 409 | This identifier already holds a purchase for this sale |
 | `SOLD_OUT` | 409 | Stock exhausted while the sale is still open |
 | `NOT_PURCHASED` | 200 | (`GET .../purchase/:identifier` only) this identifier hasn't purchased — not an error, the check itself succeeded |
+| `PURCHASE_PENDING` | 200 | (`GET .../purchase/:identifier` only) Redis already holds this identifier's slot (checked via `SISMEMBER` on the buyers set) but the durable row hasn't landed yet — distinct from `NOT_PURCHASED`, which means this identifier was never accepted at all |
 | `TEMPORARY_FAILURE` | 503 | Redis accepted the purchase but enqueueing the persistence job failed; the Redis slot is given back (compensated) before responding |
+
+**Bug found and fixed: `checkPurchaseStatus()` could contradict a purchase the
+client had just been told succeeded.** Before this fix, the check endpoint only
+ever queried `purchases` directly — so in the (normally brief) window between
+`attemptPurchase()` returning `accepted: true` and the queued worker actually
+inserting the row, a client polling "did I get one?" would see `NOT_PURCHASED`,
+flatly contradicting the success response it had just received. The integration
+suite never caught this because its own tests call the two endpoints in sequence
+with `await`, giving the worker time to drain in between — the test wasn't wrong,
+it just never constructed the race window. Fixed by having `checkPurchaseStatus()`
+fall back to `PurchaseGateway.isBuyer()` (`SISMEMBER` on the Redis buyers set,
+the same set the Lua script itself maintains) before concluding `NOT_PURCHASED` —
+Redis already holds the ground truth on who has a slot, so the check endpoint
+doesn't need to wait on Postgres to answer honestly, it just needs to be honest
+that the row hasn't landed yet. Verified with an integration test that seeds
+the Redis buyers set directly (bypassing the worker entirely, so the race is
+reproduced deterministically rather than hoped for) and asserts `PURCHASE_PENDING`
+comes back, not `NOT_PURCHASED`.
 
 All of the above were verified manually end-to-end (`curl`, with the sale window and
 seed row adjusted to force each state) — see Testing below for what's automated
@@ -577,7 +664,7 @@ versus manual so far.
 
 ## Testing
 
-- **Unit (automated):** 51 tests across four suites, run with `npm run test:backend`
+- **Unit (automated):** 65 tests across four suites, run with `npm run test:backend`
   (or `npm --prefix app/backend run test`):
   - `flash-sale.test.ts` covers `FlashSaleService` in isolation — `SaleRepository`,
     `PurchaseRepository`, `PurchaseGateway`, and `PurchasePersistenceQueue` are all
@@ -585,26 +672,41 @@ versus manual so far.
     (`resolveWindowStatus`); `getSaleStatus`'s `NotFoundException` and
     stock-remaining math off `sale.soldCount` (including the `Math.max(..., 0)`
     floor); `attemptPurchase`'s full branch set — bootstrapping from `soldCount`
-    only when `isBootstrapped()` is false, skipping Postgres entirely when it's
-    already bootstrapped, a successful purchase enqueueing the persistence job,
-    each gateway rejection code passed through without enqueueing, and the
+    and `PurchaseRepository.findIdentifiers()` only when `isBootstrapped()` is
+    false (plus the `InternalServerErrorException` path when fetching those
+    identifiers fails), skipping Postgres entirely when it's already
+    bootstrapped, a successful purchase enqueueing the persistence job, each
+    gateway rejection code passed through without enqueueing, and the
     compensate-then-`TEMPORARY_FAILURE` path when enqueueing itself fails; and
-    `checkPurchaseStatus`'s found/`NOT_PURCHASED` branches.
+    `checkPurchaseStatus`'s three branches — a found row (skipping the Redis
+    check entirely), `PURCHASE_PENDING` when no row exists yet but
+    `PurchaseGateway.isBuyer()` says Redis already holds the slot, and
+    `NOT_PURCHASED` when neither does.
   - `purchase-gateway.test.ts` covers `PurchaseGateway.isBootstrapped()` (Redis
-    `EXISTS`) alongside `bootstrap`/`compensate` — `compensate` asserts all three
-    writes (`INCR`, `SREM`, and the `updatedAt` marker `SET`) go through one
-    `MULTI` so a given-back slot is never invisible to reconciliation.
+    `EXISTS`) alongside `bootstrap` (now also rebuilding the buyers set via
+    `SADD` in the same `MULTI` as the counter `SET ... NX`, and skipping `SADD`
+    entirely when there are no prior identifiers), `compensate` (asserts all
+    three writes — `INCR`, `SREM`, and the `updatedAt` marker `SET` — go through
+    one `MULTI`), the new `releaseStock` (same shape as `compensate` but `SADD`
+    instead of `SREM`, and an explicit assertion that it never calls `SREM` at
+    all), `isBuyer` (`SISMEMBER`), and `acquireReconcileLock` (`SET ... NX PX`,
+    both the acquired and already-held-by-another-instance outcomes).
   - `purchase-persistence.processor.test.ts` covers the queue worker: a normal
-    insert, the defensive no-op when the row already exists, letting an error
-    propagate so BullMQ retries, and `onFailed` only compensating once
-    `attemptsMade` reaches the configured max (not on every failed attempt).
+    insert, releasing the double-decremented stock slot (without removing the
+    buyer) when the row already exists, letting an error propagate so BullMQ
+    retries, and `onFailed` only compensating once `attemptsMade` reaches the
+    configured max (not on every failed attempt).
   - `reconciliation.service.test.ts` covers `ReconciliationService.reconcile()`:
-    cold-start rebuild of Redis from Postgres, Postgres-newer and Redis-newer
-    last-write-wins, the tie-goes-to-Postgres default, flooring the derived
-    `soldCount` at zero, `reconcileAll()` fanning out over every known sale, and
-    every dependency call (`findById`, `getStockSnapshot`, `overwriteStock`,
-    `overwriteSoldCount`, `findAllIds`) resolving cleanly instead of throwing when
-    it rejects.
+    acquiring the per-sale lock before doing any work (and skipping everything,
+    including the sale lookup, when another instance already holds it), cold-start
+    rebuild of Redis from Postgres, Postgres-newer and Redis-newer last-write-wins,
+    the tie-goes-to-Postgres default, **never raising Redis's stock even when
+    Postgres is timestamp-newer** (a dedicated test asserts `overwriteStock` is
+    skipped when the computed target would exceed Redis's current stock),
+    flooring the derived `soldCount` at zero, `reconcileAll()` fanning out over
+    every known sale, and every dependency call (`acquireReconcileLock`,
+    `findById`, `getStockSnapshot`, `overwriteStock`, `overwriteSoldCount`,
+    `findAllIds`) resolving cleanly instead of throwing when it rejects.
 - **Integration (automated):** `flash-sale.integration.test.ts` boots the real Nest
   application (Fastify adapter, same `ValidationPipe` as `main.ts`) and drives it over
   HTTP with `supertest`, against the real Postgres, real Redis, and a real BullMQ
@@ -623,6 +725,10 @@ versus manual so far.
     (200), and a successful purchase (200), each asserted against both the HTTP
     response and the underlying Postgres/Redis state — including `sales.sold_count`
     landing at the expected value once the worker drains.
+  - **`PURCHASE_PENDING`:** seeds the Redis buyers set directly for an identifier
+    with no `purchases` row (reproducing the accepted-but-not-yet-durable race
+    deterministically, rather than depending on worker timing) and asserts
+    `checkPurchaseStatus` returns `PURCHASE_PENDING`, not `NOT_PURCHASED`.
   - **Idempotency** (Decision 4): the same identifier purchasing twice sequentially
     returns `ALREADY_PURCHASED` on the second call, with exactly one row in `purchases`.
   - **Oversell invariant:** stock `S = 5`, `15` concurrent requests from distinct
@@ -983,14 +1089,22 @@ server was never the bottleneck at that `N`.
   unit out of a hundred is an internal loss that can be reconciled later. Closing
   this gap fully would require a reservation with a TTL and a confirm/rollback state
   machine — complexity that isn't justified at this scale.
-- **`sales.sold_count` can still drift briefly during an in-flight async write.**
+- **`sales.sold_count` can still lag briefly during an in-flight async write.**
   Redis bootstrap seeds from `sold_count` rather than a fresh `COUNT(*)` (Decision
   3.6), and `ReconciliationService` (Decision 3.7) now closes the gap where that
   could go stale indefinitely — but there's a narrow, self-correcting window right
   after a purchase is accepted and before its queued job lands: Redis is briefly
-  "more correct" than Postgres, a reconcile pass in that window will copy Redis's
-  number forward, and the two converge again once the job drains. Not an unbounded
-  drift, but worth knowing it exists.
+  "more correct" than Postgres, and a reconcile pass in that window can't yet copy
+  Redis's number forward into Postgres's `sold_count`, since the row hasn't landed
+  to justify it. The two converge once the job drains and Postgres's own write
+  updates its timestamp. This used to be a correctness risk in the other
+  direction too — a reconcile pass in the same window could raise Redis's own
+  counter back up based on Postgres's stale-low `sold_count`, undoing decrements
+  from purchases still resolving — but that direction is now structurally
+  prevented (see the reconciliation bug note under Decision 3.8): the "Postgres
+  wins" branch only ever lowers Redis's counter, never raises it. What's left is
+  a bounded lag in how quickly Postgres's own copy catches up, not a risk to the
+  oversell/dedup guarantee.
 - No authentication — a plain identifier (email/username) is trusted as-is, per
   the brief's simplification.
 - **The stress test runs against one backend process and one Redis instance, on a

@@ -37,6 +37,15 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   }
 
   async reconcile(saleId: string) {
+    // One reconciler wins per sale per interval, however many instances are running.
+    const { intervalMs } = this.configService.reconciliation();
+    const [errLock, acquired] = await awaitToError(this.purchaseGateway.acquireReconcileLock(saleId, intervalMs));
+    if (errLock) {
+      this.logger.error(`Reconciliation failed to acquire lock for sale=${saleId}: ${errLock.message}`);
+      return;
+    }
+    if (!acquired) return;
+
     const [errSale, sale] = await awaitToError(this.saleRepository.findById(saleId));
     if (errSale) {
       this.logger.error(`Reconciliation failed to load sale=${saleId}: ${errSale.message}`);
@@ -54,6 +63,13 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
     const redisUpdatedAt = redisSnapshot.updatedAt;
 
     if (redisUpdatedAt === null || redisUpdatedAt <= postgresUpdatedAt) {
+      const postgresTarget = Math.max(sale.totalStock - sale.soldCount, 0);
+      // Only ever lower Redis's stock — raising it here would reopen an oversell
+      // window while a queued job hasn't landed in Postgres yet (soldCount looks
+      // stale-low even though the timestamp says Postgres is "newer").
+      if (redisSnapshot.stockRemaining !== null && postgresTarget >= redisSnapshot.stockRemaining) {
+        return;
+      }
       const [err] = await awaitToError(
         this.purchaseGateway.overwriteStock(saleId, sale.totalStock, sale.soldCount, postgresUpdatedAt),
       );

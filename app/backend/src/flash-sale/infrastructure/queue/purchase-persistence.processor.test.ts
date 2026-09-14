@@ -20,6 +20,7 @@ function buildProcessor() {
 
   const purchaseGateway = {
     compensate: jest.fn(),
+    releaseStock: jest.fn(),
   } as unknown as jest.Mocked<PurchaseGateway>;
 
   const processor = new PurchasePersistenceProcessor(purchaseRepository, purchaseGateway);
@@ -46,11 +47,12 @@ describe("PurchasePersistenceProcessor", () => {
       });
     });
 
-    it("is a defensive no-op when the row already exists (Redis already deduped)", async () => {
-      const { processor, purchaseRepository } = buildProcessor();
+    it("releases the double-decremented stock slot when the row already exists, without removing the buyer", async () => {
+      const { processor, purchaseRepository, purchaseGateway } = buildProcessor();
       purchaseRepository.insertIfNotExists.mockResolvedValue(null);
 
       await expect(processor.process(buildJob())).resolves.toBeUndefined();
+      expect(purchaseGateway.releaseStock).toHaveBeenCalledWith("test-sale", "alice");
     });
 
     it("lets the error propagate so BullMQ retries the job", async () => {

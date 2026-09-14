@@ -30,6 +30,7 @@ function buildService() {
   const purchaseRepository = {
     findByIdentifier: jest.fn(),
     count: jest.fn(),
+    findIdentifiers: jest.fn().mockResolvedValue([]),
     insertIfNotExists: jest.fn(),
   } as unknown as jest.Mocked<PurchaseRepository>;
 
@@ -38,6 +39,7 @@ function buildService() {
     bootstrap: jest.fn(),
     attemptPurchase: jest.fn(),
     compensate: jest.fn(),
+    isBuyer: jest.fn().mockResolvedValue(false),
   } as unknown as jest.Mocked<PurchaseGateway>;
 
   const purchasePersistenceQueue = {
@@ -146,16 +148,26 @@ describe("FlashSaleService", () => {
       await expect(service.attemptPurchase("test-sale", "alice")).rejects.toBeInstanceOf(InternalServerErrorException);
     });
 
-    it("bootstraps the gateway from sale.soldCount when not yet bootstrapped", async () => {
-      const { service, saleRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
+    it("bootstraps the gateway from sale.soldCount and prior identifiers when not yet bootstrapped", async () => {
+      const { service, saleRepository, purchaseRepository, purchaseGateway, purchasePersistenceQueue } = buildService();
       saleRepository.findById.mockResolvedValue(buildSale({ totalStock: 10, soldCount: 4 }));
       purchaseGateway.isBootstrapped.mockResolvedValue(false);
+      purchaseRepository.findIdentifiers.mockResolvedValue(["alice", "bob"]);
       purchaseGateway.attemptPurchase.mockResolvedValue({ accepted: true });
       purchasePersistenceQueue.enqueue.mockResolvedValue(undefined);
 
       await service.attemptPurchase("test-sale", "alice");
 
-      expect(purchaseGateway.bootstrap).toHaveBeenCalledWith("test-sale", 10, 4);
+      expect(purchaseGateway.bootstrap).toHaveBeenCalledWith("test-sale", 10, 4, ["alice", "bob"]);
+    });
+
+    it("throws InternalServerErrorException when fetching prior identifiers for bootstrap fails", async () => {
+      const { service, saleRepository, purchaseRepository, purchaseGateway } = buildService();
+      saleRepository.findById.mockResolvedValue(buildSale());
+      purchaseGateway.isBootstrapped.mockResolvedValue(false);
+      purchaseRepository.findIdentifiers.mockRejectedValue(new Error("connection reset"));
+
+      await expect(service.attemptPurchase("test-sale", "alice")).rejects.toBeInstanceOf(InternalServerErrorException);
     });
 
     it("skips bootstrap entirely (no DB touched) once the sale is already bootstrapped", async () => {
@@ -168,6 +180,7 @@ describe("FlashSaleService", () => {
       await service.attemptPurchase("test-sale", "alice");
 
       expect(purchaseRepository.count).not.toHaveBeenCalled();
+      expect(purchaseRepository.findIdentifiers).not.toHaveBeenCalled();
       expect(purchaseGateway.bootstrap).not.toHaveBeenCalled();
     });
 
@@ -217,9 +230,10 @@ describe("FlashSaleService", () => {
   });
 
   describe("checkPurchaseStatus", () => {
-    it("returns NOT_PURCHASED when no purchase record exists for the identifier", async () => {
-      const { service, purchaseRepository } = buildService();
+    it("returns NOT_PURCHASED when no purchase record exists and the identifier isn't a Redis buyer", async () => {
+      const { service, purchaseRepository, purchaseGateway } = buildService();
       purchaseRepository.findByIdentifier.mockResolvedValue(undefined);
+      purchaseGateway.isBuyer.mockResolvedValue(false);
 
       const result = await service.checkPurchaseStatus("test-sale", "bob");
 
@@ -230,8 +244,30 @@ describe("FlashSaleService", () => {
       });
     });
 
-    it("returns the purchase record when one exists", async () => {
-      const { service, purchaseRepository } = buildService();
+    it("returns PURCHASE_PENDING when no row exists yet but Redis already holds the slot", async () => {
+      const { service, purchaseRepository, purchaseGateway } = buildService();
+      purchaseRepository.findByIdentifier.mockResolvedValue(undefined);
+      purchaseGateway.isBuyer.mockResolvedValue(true);
+
+      const result = await service.checkPurchaseStatus("test-sale", "bob");
+
+      expect(result).toEqual({
+        accepted: false,
+        code: PurchaseErrorCode.PURCHASE_PENDING,
+        message: expect.any(String),
+      });
+    });
+
+    it("throws InternalServerErrorException when checking Redis buyer status rejects unexpectedly", async () => {
+      const { service, purchaseRepository, purchaseGateway } = buildService();
+      purchaseRepository.findByIdentifier.mockResolvedValue(undefined);
+      purchaseGateway.isBuyer.mockRejectedValue(new Error("redis down"));
+
+      await expect(service.checkPurchaseStatus("test-sale", "bob")).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+
+    it("returns the purchase record when one exists, without checking Redis", async () => {
+      const { service, purchaseRepository, purchaseGateway } = buildService();
       const createdAt = new Date("2026-09-09T11:00:00Z");
       purchaseRepository.findByIdentifier.mockResolvedValue({
         id: "p1",
@@ -243,6 +279,7 @@ describe("FlashSaleService", () => {
       const result = await service.checkPurchaseStatus("test-sale", "bob");
 
       expect(result).toEqual({ accepted: true, identifier: "bob", purchasedAt: createdAt.toISOString() });
+      expect(purchaseGateway.isBuyer).not.toHaveBeenCalled();
     });
 
     it("throws InternalServerErrorException when the lookup rejects unexpectedly", async () => {

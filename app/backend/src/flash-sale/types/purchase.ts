@@ -5,6 +5,7 @@ export const PurchaseErrorCode = {
   SOLD_OUT: "SOLD_OUT",
   TEMPORARY_FAILURE: "TEMPORARY_FAILURE",
   NOT_PURCHASED: "NOT_PURCHASED",
+  PURCHASE_PENDING: "PURCHASE_PENDING",
 } as const;
 
 export type PurchaseErrorCode = (typeof PurchaseErrorCode)[keyof typeof PurchaseErrorCode];
@@ -31,4 +32,5 @@ export const PurchaseErrorHttpStatus: Record<PurchaseErrorCode, number> = {
   [PurchaseErrorCode.SOLD_OUT]: 409,
   [PurchaseErrorCode.TEMPORARY_FAILURE]: 503,
   [PurchaseErrorCode.NOT_PURCHASED]: 200,
+  [PurchaseErrorCode.PURCHASE_PENDING]: 200,
 };

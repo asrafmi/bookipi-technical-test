@@ -15,6 +15,7 @@ const ERROR_MESSAGES: Record<PurchaseErrorCode, string> = {
   [PurchaseErrorCode.SOLD_OUT]: "This item is sold out.",
   [PurchaseErrorCode.TEMPORARY_FAILURE]: "Something went wrong. Please try again.",
   [PurchaseErrorCode.NOT_PURCHASED]: "This user has not purchased an item in this sale.",
+  [PurchaseErrorCode.PURCHASE_PENDING]: "Your purchase was accepted and is still being recorded. Please check again shortly.",
 };
 
 @Injectable()
@@ -66,7 +67,9 @@ export class FlashSaleService {
     // Skip touching Postgres once the sale is already bootstrapped.
     const isBootstrapped = await this.purchaseGateway.isBootstrapped(saleId);
     if (!isBootstrapped) {
-      await this.purchaseGateway.bootstrap(saleId, sale.totalStock, sale.soldCount);
+      const [errIdentifiers, identifiers] = await awaitToError(this.purchaseRepository.findIdentifiers(saleId));
+      if (errIdentifiers) throw new InternalServerErrorException("Failed to fetch existing purchasers");
+      await this.purchaseGateway.bootstrap(saleId, sale.totalStock, sale.soldCount, identifiers);
     }
 
     const now = new Date();
@@ -86,8 +89,14 @@ export class FlashSaleService {
   async checkPurchaseStatus(saleId: string, identifier: string): Promise<PurchaseResult> {
     const [errPurchase, purchase] = await awaitToError(this.purchaseRepository.findByIdentifier(saleId, identifier));
     if (errPurchase) throw new InternalServerErrorException("Failed to fetch purchase status");
-    if (!purchase) return this.failure(PurchaseErrorCode.NOT_PURCHASED);
+    if (purchase) return { accepted: true, identifier: purchase.identifier, purchasedAt: purchase.createdAt.toISOString() };
 
-    return { accepted: true, identifier: purchase.identifier, purchasedAt: purchase.createdAt.toISOString() };
+    // Redis already holds the truth about who has a slot — the row just hasn't
+    // landed yet. Distinguish that from never having purchased at all.
+    const [errBuyer, isBuyer] = await awaitToError(this.purchaseGateway.isBuyer(saleId, identifier));
+    if (errBuyer) throw new InternalServerErrorException("Failed to fetch purchase status");
+    if (isBuyer) return this.failure(PurchaseErrorCode.PURCHASE_PENDING);
+
+    return this.failure(PurchaseErrorCode.NOT_PURCHASED);
   }
 }

@@ -20,6 +20,14 @@ export class PurchaseRepository {
     return this.db.$count(purchases, eq(purchases.saleId, saleId));
   }
 
+  async findIdentifiers(saleId: string): Promise<string[]> {
+    const rows = await this.db.query.purchases.findMany({
+      where: eq(purchases.saleId, saleId),
+      columns: { identifier: true },
+    });
+    return rows.map((row) => row.identifier);
+  }
+
   // Insert and the sold_count bump happen in one transaction so they never drift apart.
   async insertIfNotExists(input: NewPurchaseRow): Promise<PurchaseRow | null> {
     const [err, result] = await awaitToError(

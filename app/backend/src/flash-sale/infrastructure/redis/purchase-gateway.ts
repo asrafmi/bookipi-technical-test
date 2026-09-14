@@ -47,15 +47,22 @@ export class PurchaseGateway implements OnModuleInit {
     return `sale:${saleId}:stock:updatedAt`;
   }
 
+  private reconcileLockKey(saleId: string) {
+    return `reconcile:lock:${saleId}`;
+  }
+
   // Short-circuit so callers can skip bootstrap once the sale already has a stock key.
   async isBootstrapped(saleId: string): Promise<boolean> {
     return (await this.redis.exists(this.stockKey(saleId))) === 1;
   }
 
   // SET ... NX in one round trip — EXISTS then SET would race under concurrent first-purchase requests.
-  async bootstrap(saleId: string, totalStock: number, purchasedCount: number) {
+  // Also rebuilds the buyers set from Postgres, or an AOF restart that lost it would let past buyers re-purchase.
+  async bootstrap(saleId: string, totalStock: number, purchasedCount: number, identifiers: string[]) {
     const stockKey = this.stockKey(saleId);
-    await this.redis.set(stockKey, Math.max(totalStock - purchasedCount, 0), "NX");
+    const pipeline = this.redis.multi().set(stockKey, Math.max(totalStock - purchasedCount, 0), "NX");
+    if (identifiers.length > 0) pipeline.sadd(this.buyersKey(saleId), identifiers);
+    await pipeline.exec();
   }
 
   async attemptPurchase(saleId: string, identifier: string, now: Date, startsAt: Date, endsAt: Date): Promise<PurchaseGatewayResult> {
@@ -81,6 +88,28 @@ export class PurchaseGateway implements OnModuleInit {
       .srem(this.buyersKey(saleId), identifier)
       .set(this.updatedAtKey(saleId), Date.now())
       .exec();
+  }
+
+  // For the row-already-exists case in the worker: give the slot back WITHOUT
+  // removing the identifier — they did buy, SREM here would let them buy again.
+  async releaseStock(saleId: string, identifier: string) {
+    await this.redis
+      .multi()
+      .incr(this.stockKey(saleId))
+      .sadd(this.buyersKey(saleId), identifier)
+      .set(this.updatedAtKey(saleId), Date.now())
+      .exec();
+  }
+
+  // Lets checkPurchaseStatus tell "queued, not landed yet" apart from "never purchased".
+  async isBuyer(saleId: string, identifier: string): Promise<boolean> {
+    return (await this.redis.sismember(this.buyersKey(saleId), identifier)) === 1;
+  }
+
+  // One instance reconciles per sale per interval, regardless of how many instances run.
+  async acquireReconcileLock(saleId: string, ttlMs: number): Promise<boolean> {
+    const result = await this.redis.set(this.reconcileLockKey(saleId), "1", "PX", ttlMs, "NX");
+    return result === "OK";
   }
 
   // Reconciliation reads: null fields mean this side has no data yet (cold start).

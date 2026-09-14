@@ -20,7 +20,10 @@ export class PurchasePersistenceProcessor extends WorkerHost {
     super();
   }
 
-  // Makes Redis's already-atomic decision durable; a conflict here is a defensive no-op.
+  // Makes Redis's already-atomic decision durable; a conflict here means the
+  // row already exists (e.g. bootstrap rebuilt the buyers set from a row this
+  // exact job already wrote) — give the double-decremented slot back, but
+  // never remove the identifier, since this person did buy.
   async process(job: Job<PersistPurchaseJobData>): Promise<void> {
     const { saleId, identifier } = job.data;
 
@@ -32,7 +35,8 @@ export class PurchasePersistenceProcessor extends WorkerHost {
       throw error; // retry via BullMQ
     }
     if (!purchase) {
-      this.logger.warn(`Purchase already persisted for sale=${saleId} identifier=${identifier}, skipping`);
+      this.logger.warn(`Purchase already persisted for sale=${saleId} identifier=${identifier}, releasing stock`);
+      await this.purchaseGateway.releaseStock(saleId, identifier);
     }
   }
 
