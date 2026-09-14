@@ -67,9 +67,18 @@ src/
   flash-sale/
     domain/flash-sale/
       flash-sale.service.ts    The atomic purchase decision + window logic — orchestrates
-                                SaleRepository, PurchaseRepository, PurchaseGateway.
+                                SaleRepository, PurchaseRepository, PurchaseGateway,
+                                PurchasePersistenceQueue.
       flash-sale.interface.ts  Service-level option/return shapes.
-      flash-sale.test.ts       Unit tests — all three dependencies mocked with jest.fn().
+      flash-sale.test.ts       Unit tests — all dependencies mocked with jest.fn().
+    domain/reconciliation/
+      reconciliation.service.ts     ReconciliationService — two-way, lastUpdatedAt-based
+                                     last-write-wins between Redis's marker and Postgres's
+                                     sold_count_updated_at; runs at startup and on
+                                     RECONCILIATION_INTERVAL_MS (Decision 3.7).
+      reconciliation.service.test.ts  Unit tests — cold start, Postgres-newer, Redis-newer,
+                                       tie-goes-to-Postgres, flooring at zero, reconcileAll
+                                       fan-out, and every dependency's error path.
     application/rest/
       controller/
         flash-sale.controller.ts        The three endpoints from the brief.
@@ -80,16 +89,36 @@ src/
         attempt-purchase.response.ts    Swagger-documented purchase/check response shape.
     infrastructure/
       redis/
-        purchase.lua              The atomic Lua script: window + dedup + stock, one round trip.
-        purchase-gateway.ts        PurchaseGateway — bootstraps Redis stock from Postgres on
-                                    first use (a single `SET ... NX`, not check-then-set — see
-                                    root README's Decision 1), then EVALSHAs the script.
-        purchase-gateway.test.ts   Unit tests — bootstrap's NX seeding and compensate, redis mocked.
+        purchase.lua              The atomic Lua script: window + dedup + stock + updatedAt
+                                   marker, one round trip.
+        purchase-gateway.ts        PurchaseGateway — bootstraps Redis stock from Postgres's
+                                    sold_count on first use (a single `SET ... NX`, not
+                                    check-then-set — see root README's Decision 1), skippable
+                                    via isBootstrapped(); compensate() gives a slot back and
+                                    bumps the updatedAt marker in one MULTI so reconciliation
+                                    always sees the change.
+        purchase-gateway.test.ts   Unit tests — NX seeding, isBootstrapped, and compensate's
+                                    three writes going through one MULTI, redis mocked.
       repository/
         purchase/purchase.entity.ts     Drizzle schema for `purchases` — UNIQUE(sale_id, identifier).
-        purchase/purchase.repository.ts PurchaseRepository — findByIdentifier, count, insertIfNotExists.
-        sale/sale.entity.ts             Drizzle schema for `sales` — static per-sale config.
-        sale/sale.repository.ts         SaleRepository — findById.
+        purchase/purchase.repository.ts PurchaseRepository — findByIdentifier, count,
+                                         insertIfNotExists (INSERT + sold_count/
+                                         sold_count_updated_at bump in one transaction).
+        sale/sale.entity.ts             Drizzle schema for `sales` — static config plus
+                                         sold_count/sold_count_updated_at (Decision 3.6/3.7).
+        sale/sale.repository.ts         SaleRepository — findById, findAllIds,
+                                         overwriteSoldCount (reconciliation's Redis→Postgres
+                                         write path).
+      queue/
+        purchase-persistence.job.ts       Queue name + job payload shape.
+        purchase-persistence.queue.ts     PurchasePersistenceQueue — enqueues a job, never
+                                           re-validates window/stock/dedup (Redis already did).
+        purchase-persistence.processor.ts PurchasePersistenceProcessor (BullMQ worker) — the
+                                           actual INSERT, retried with backoff; compensates
+                                           Redis only once retries are exhausted (Decision 3).
+        purchase-persistence.processor.test.ts  Unit tests — normal insert, already-persisted
+                                           no-op, retry-on-error, compensate-only-on-last-attempt.
+        purchase-queue.module.ts          Wires BullMQ's connection + registers the queue/worker.
     types/
       purchase.ts        PurchaseErrorCode, LuaOutcome, PurchaseErrorHttpStatus (as const
                           objects — see root README's naming conventions).
@@ -106,17 +135,30 @@ system needs — no CQRS, no extra modules for the sake of structure.
 - Done — All three endpoints from the brief, implemented and wired to real state:
   sale status, attempt purchase, check own result.
 - Done — Atomic purchase decision: `purchase.lua`, executed via `PurchaseGateway`,
-  covers window check + per-user dedup + stock decrement in one Redis round trip.
+  covers window check + per-user dedup + stock decrement + updatedAt marker in one
+  Redis round trip.
 - Done — Durable record: `purchases` table with `UNIQUE(sale_id, identifier)` as the
   structural safety net behind the Redis decision. See root README's Decisions 1–2.
-- Done — Unit tests (`flash-sale.test.ts`) covering `FlashSaleService` with all three
-  dependencies mocked.
-- Done — Integration tests (`flash-sale.integration.test.ts`) against real Postgres +
-  Redis, including the oversell (15 concurrent, stock 5) and duplicate-user (10
-  concurrent, same identifier) invariants.
+- Done — Postgres write is asynchronous via a BullMQ queue (`PurchasePersistenceQueue`
+  + `PurchasePersistenceProcessor`), not in the request path. `sales.sold_count` is a
+  stored counter bumped in the same transaction as the insert, not a live `COUNT(*)`.
+  See root README's Decision 3/3.6.
+- Done — `ReconciliationService` — two-way, timestamp-based last-write-wins between
+  Redis's stock marker and Postgres's `sold_count_updated_at`, at startup and on a
+  configurable interval. See root README's Decision 3.7.
+- Done — Redis persistence (AOF, `appendfsync everysec`) in both dev and prod Docker
+  Compose stacks. See root README's Decision 3.8.
+- Done — Unit tests across four suites (`flash-sale.test.ts`, `purchase-gateway.test.ts`,
+  `purchase-persistence.processor.test.ts`, `reconciliation.service.test.ts`) — 51
+  tests total, all infra dependencies mocked.
+- Done — Integration tests (`flash-sale.integration.test.ts`) against real Postgres,
+  Redis, and a real BullMQ worker, including the oversell (15 concurrent, stock 5) and
+  duplicate-user (10 concurrent, same identifier) invariants, and `sold_count`/
+  `sold_count_updated_at` correctness after the async worker drains.
 - Done — High-`N` stress test (`src/flash-sale/stress-test/run.ts`, run via
-  `npm run test:stress`): 10 iterations of stock=50/10,000-concurrent-user oversell, all
-  passed, plus duplicate-user and boundary checks. See root README's Stress test results.
+  `npm run test:stress`): 10 iterations of a stock=50 oversell test, plus duplicate-user
+  and boundary checks, polling for the async worker to drain before asserting DB state.
+  See root README's Stress test results.
 - Done — ESLint config (`.eslintrc.json`, `@typescript-eslint` on
   `eslint:recommended` + `plugin:@typescript-eslint/recommended`). CI's backend job
   runs `tsc --noEmit` **and** `npm run lint`.
@@ -190,6 +232,7 @@ Copy `.env.example` to `.env` before running.
 | `DB_POOL_MAX` | No | `10` | postgres-js connection pool size. Raised (e.g. to `50`) where concurrent purchase load needs more headroom than one connection per in-flight request — see the oversell test note above; the pool was the actual bottleneck, not the HTTP layer, once diagnosed. |
 | `REDIS_HOST` | Yes | — | Redis host. |
 | `REDIS_PORT` | Yes | — | Redis port. |
+| `RECONCILIATION_INTERVAL_MS` | No | `300000` (5 min) | How often `ReconciliationService` reconciles every sale's `sold_count` against Redis's stock marker, after the one run it always does at startup. |
 
 `validate-env.ts` fails startup fast if any `Yes`-required variable above is missing
 (skipped when `NODE_ENV=test`, since CI supplies these as real env vars instead of a

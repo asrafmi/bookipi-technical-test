@@ -149,6 +149,8 @@ describe("FlashSaleController (integration)", () => {
 
         const updatedSale = await db.query.sales.findFirst({ where: eq(sales.id, sale.id) });
         expect(updatedSale?.soldCount).toBe(1);
+        // soldCountUpdatedAt must move with soldCount, or reconciliation stays stuck.
+        expect(updatedSale?.soldCountUpdatedAt.getTime()).toBeGreaterThan(sale.soldCountUpdatedAt.getTime());
       } finally {
         await cleanupSale(sale.id);
       }

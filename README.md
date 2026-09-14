@@ -34,7 +34,7 @@ Monorepo: [`app/frontend`](app/frontend) (React) and [`app/backend`](app/backend
 - Done — Backend: unit tests for `FlashSaleService` (`flash-sale.test.ts`), the queue
   worker (`purchase-persistence.processor.test.ts`), `PurchaseGateway`
   (`purchase-gateway.test.ts`), and `ReconciliationService`
-  (`reconciliation.service.test.ts`) — 46 tests total, `SaleRepository`/
+  (`reconciliation.service.test.ts`) — 51 tests total, `SaleRepository`/
   `PurchaseRepository`/`PurchaseGateway`/`PurchasePersistenceQueue` mocked via `jest.fn()`.
 - Done — Backend: automated integration tests (`flash-sale.integration.test.ts`) hitting
   a real running Nest app over HTTP, against real Postgres, real Redis, and a real
@@ -393,6 +393,23 @@ count into `sales.sold_count` slightly ahead of what `purchases` can currently p
 This is a bounded, self-correcting lag tied to queue depth (it closes itself once the
 job drains and Postgres's own timestamp catches up), not unbounded drift.
 
+**Bug found and fixed: `sold_count_updated_at` never actually moved.** The worker's
+`insertIfNotExists` transaction bumped `sold_count` but left `sold_count_updated_at`
+untouched, so it stayed frozen at whatever the row's `defaultNow()` happened to be.
+Verified directly against real Postgres: a purchase raised `sold_count` from 6 to 7
+but `sold_count_updated_at` didn't move at all. Once frozen, Redis's marker (which
+does move, on every accepted purchase) permanently out-ages Postgres — reconciliation
+would keep declaring Redis "newer" forever, even once both sides already agreed,
+and in a constructed drift scenario (Postgres given a wrong `sold_count` at the same
+frozen timestamp Redis's tie-break defaults to) reconciliation overwrote a *correct*
+Redis counter with the *wrong* Postgres one. `compensate()` had the same gap — giving
+a slot back via `INCR`/`SREM` never touched the marker either. Fixed by setting
+`soldCountUpdatedAt` to the inserted row's own `createdAt` in the same transaction,
+and moving `compensate()`'s three writes (`INCR`, `SREM`, marker `SET`) into one
+Redis `MULTI`. Covered by a new integration assertion (`soldCountUpdatedAt` must
+advance past the seeded value after a purchase) and an updated `purchase-gateway.test.ts`
+that asserts `compensate` writes all three through one `MULTI`.
+
 **Decision 3.8: Redis persistence is AOF with `appendfsync everysec`, not RDB.**
 
 Chosen: `redis-server --appendonly yes --appendfsync everysec`, set in both the dev
@@ -560,7 +577,7 @@ versus manual so far.
 
 ## Testing
 
-- **Unit (automated):** 34 tests across three suites, run with `npm run test:backend`
+- **Unit (automated):** 51 tests across four suites, run with `npm run test:backend`
   (or `npm --prefix app/backend run test`):
   - `flash-sale.test.ts` covers `FlashSaleService` in isolation — `SaleRepository`,
     `PurchaseRepository`, `PurchaseGateway`, and `PurchasePersistenceQueue` are all
@@ -574,11 +591,20 @@ versus manual so far.
     compensate-then-`TEMPORARY_FAILURE` path when enqueueing itself fails; and
     `checkPurchaseStatus`'s found/`NOT_PURCHASED` branches.
   - `purchase-gateway.test.ts` covers `PurchaseGateway.isBootstrapped()` (Redis
-    `EXISTS`) alongside the existing `bootstrap`/`compensate` coverage.
+    `EXISTS`) alongside `bootstrap`/`compensate` — `compensate` asserts all three
+    writes (`INCR`, `SREM`, and the `updatedAt` marker `SET`) go through one
+    `MULTI` so a given-back slot is never invisible to reconciliation.
   - `purchase-persistence.processor.test.ts` covers the queue worker: a normal
     insert, the defensive no-op when the row already exists, letting an error
     propagate so BullMQ retries, and `onFailed` only compensating once
     `attemptsMade` reaches the configured max (not on every failed attempt).
+  - `reconciliation.service.test.ts` covers `ReconciliationService.reconcile()`:
+    cold-start rebuild of Redis from Postgres, Postgres-newer and Redis-newer
+    last-write-wins, the tie-goes-to-Postgres default, flooring the derived
+    `soldCount` at zero, `reconcileAll()` fanning out over every known sale, and
+    every dependency call (`findById`, `getStockSnapshot`, `overwriteStock`,
+    `overwriteSoldCount`, `findAllIds`) resolving cleanly instead of throwing when
+    it rejects.
 - **Integration (automated):** `flash-sale.integration.test.ts` boots the real Nest
   application (Fastify adapter, same `ValidationPipe` as `main.ts`) and drives it over
   HTTP with `supertest`, against the real Postgres, real Redis, and a real BullMQ

@@ -3,7 +3,12 @@ import { RedisClient } from "src/redis/redis.client";
 
 function buildGateway() {
   const multiExec = jest.fn().mockResolvedValue([]);
-  const multi = { set: jest.fn().mockReturnThis(), exec: multiExec };
+  const multi = {
+    set: jest.fn().mockReturnThis(),
+    incr: jest.fn().mockReturnThis(),
+    srem: jest.fn().mockReturnThis(),
+    exec: multiExec,
+  };
   const redis = {
     set: jest.fn(),
     get: jest.fn(),
@@ -65,13 +70,16 @@ describe("PurchaseGateway", () => {
   });
 
   describe("compensate", () => {
-    it("gives the stock slot back and removes the identifier from the buyers set", async () => {
-      const { gateway, redis } = buildGateway();
+    it("gives the stock slot back, removes the identifier, and bumps the updatedAt marker — atomically via MULTI", async () => {
+      const { gateway, redis, multi } = buildGateway();
 
       await gateway.compensate("sale-1", "user@example.com");
 
-      expect(redis.incr).toHaveBeenCalledWith("sale:sale-1:stock");
-      expect(redis.srem).toHaveBeenCalledWith("sale:sale-1:buyers", "user@example.com");
+      expect(redis.multi).toHaveBeenCalledTimes(1);
+      expect(multi.incr).toHaveBeenCalledWith("sale:sale-1:stock");
+      expect(multi.srem).toHaveBeenCalledWith("sale:sale-1:buyers", "user@example.com");
+      expect(multi.set).toHaveBeenCalledWith("sale:sale-1:stock:updatedAt", expect.any(Number));
+      expect(multi.exec).toHaveBeenCalledTimes(1);
     });
   });
 

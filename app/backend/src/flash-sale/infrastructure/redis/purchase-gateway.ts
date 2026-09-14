@@ -73,9 +73,14 @@ export class PurchaseGateway implements OnModuleInit {
     return { accepted: false, code: PurchaseErrorCode[outcome as keyof typeof PurchaseErrorCode] };
   }
 
+  // Marker must move too, or reconciliation never sees this counter change.
   async compensate(saleId: string, identifier: string) {
-    await this.redis.incr(this.stockKey(saleId));
-    await this.redis.srem(this.buyersKey(saleId), identifier);
+    await this.redis
+      .multi()
+      .incr(this.stockKey(saleId))
+      .srem(this.buyersKey(saleId), identifier)
+      .set(this.updatedAtKey(saleId), Date.now())
+      .exec();
   }
 
   // Reconciliation reads: null fields mean this side has no data yet (cold start).

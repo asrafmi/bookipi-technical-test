@@ -27,9 +27,10 @@ export class PurchaseRepository {
         const inserted = await tx.insert(purchases).values(input).onConflictDoNothing().returning();
         const purchase = inserted[0] ?? null; // empty array = already purchased
         if (purchase) {
+          // soldCountUpdatedAt must move with soldCount, or reconciliation stays stuck.
           await tx
             .update(sales)
-            .set({ soldCount: sql`${sales.soldCount} + 1` })
+            .set({ soldCount: sql`${sales.soldCount} + 1`, soldCountUpdatedAt: purchase.createdAt })
             .where(eq(sales.id, input.saleId));
         }
         return purchase;
